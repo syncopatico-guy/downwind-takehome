@@ -9,7 +9,8 @@
     "lint": "eslint",
     "migrate": "tsx scripts/migrate.ts",
     "ingest:firms": "tsx scripts/ingest-firms.ts",
-    "verify:schema": "tsx scripts/verify-schema.ts"
+    "verify:schema": "tsx scripts/verify-schema.ts",
+    "ingest:nws": "tsx scripts/ingest-nws.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.127.0",

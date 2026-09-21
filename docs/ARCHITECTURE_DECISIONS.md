@@ -7,7 +7,7 @@ across Western North America, using five real-time data feeds.
 technical decision, the alternatives that were considered, and the reasoning that
 selected one over the others. It is maintained continuously as the build proceeds.
 
-**Status:** Live document. Last updated at end of **Step 2** (FIRMS ingester).
+**Status:** Live document. Last updated at end of **Step 3** (NWS alerts ingester).
 
 ---
 
@@ -446,6 +446,117 @@ days (2026-09-14 to 09-21), zero bbox violations, zero parse rejections, all six
 endpoints reporting `fresh`. Confidence distribution 6,714 nominal / 413 high /
 304 low; day/night 4,915 / 2,516.
 
+### 3j. NWS alerts — retention, geometry, and a corrected premise
+
+#### The corrected premise
+
+Planning asserted that "every hour of delay is an hour of history you can never
+recover," which drove the ingestion-first build order. Probing the feeds showed
+this is **wrong for four of the five**: FIRMS, OpenAQ and both Open-Meteo feeds
+all publish real archives.
+
+**Only NWS decays.** Measured retention, by national query:
+
+| Window | Features returned |
+|---|---|
+| 1–3 days ago | 500 (page cap) |
+| 7 days ago | 282 |
+| 30 days ago | **0** |
+
+So retention is roughly **7–14 days**, then the data is gone upstream. The
+conclusion "build ingestion first" survives, but for a different reason than
+originally given: we need data to build the agent and interface against, not
+because a clock is destroying history. This is the second premise imported by
+analogy that did not hold on inspection (see also 3h).
+
+**Consequence accepted deliberately:** the September 2020 seeded episode
+**cannot have an advisory layer.** Four feeds cover it; the alert layer will
+render a labelled "provider does not retain data before this date" state, and
+the agent will say so when asked. The alternative — moving the seed to a recent
+window where all five feeds have data — was rejected because the last fortnight
+had almost no fire or alert activity in scope, forfeiting the dramatic episode
+seeding exists to guarantee.
+
+#### Payload findings that forced schema changes
+
+Inspecting a real 200-feature response revealed four mismatches with the
+initial schema:
+
+| Finding | Consequence |
+|---|---|
+| Geometry is `Polygon`, not `MultiPolygon` (124 of 200) | Inserts would have failed outright. Fixed with `ST_Multi()` on insert, preserving the column's type safety rather than loosening it to `Geometry` |
+| **38% have NULL geometry** and are zone-coded — **79% within our eight states** | Zone geometry is mandatory; see below |
+| `id` is unique **per message**, not per alert (200/200 distinct) | Amendments arrive as new messages linked by `references` (61 of 200; 64 Cancels observed). Added `references_ids text[]` — without the chain, an alert *lifted early* is indistinguishable from one that simply expired, which is a timeline correctness problem |
+| `status` may be `Test` (5 of 200) | Retained rather than dropped, so the record stays faithful to what was published; every product query filters `status = 'Actual'` |
+
+Also added `same_codes` (the payload carries both UGC and SAME geocodes) and
+`effective` (distinct from `onset` in some products). All applied in migration
+**003**, as a new file — `001` was already applied, and the runner correctly
+refuses to re-run a modified applied migration.
+
+#### Zone geometry — lazy resolution, chosen
+
+Since every air-quality and fire-weather alert sampled was zone-coded, without
+zone polygons the advisory layer cannot be mapped or joined to stations at all.
+The bulk `/zones?include_geometry=true` endpoint proved useless: it returned
+601 zones with **zero** geometries, silently ignoring the parameter. Individual
+zone fetches do return polygons (~66 KB, 179–1,301 points each).
+
+**Chosen:** fetch a zone the first time an alert references it and cache it
+permanently in `nws_zones`.
+
+| Alternative | Why rejected |
+|---|---|
+| **Pre-load all 601 forecast zones** | Cleaner: a purely-database ingest path with no network dependency. Rejected at ~20 MB of mostly-unused geometry, when only ~16 distinct zones appeared across eight states in two weeks. |
+| **Store zone codes and names only** | Zero cost, but forfeits mapping and spatial joins — gutting the "officials declared an alert here but the sensor reads moderate" conflict story that justifies this feed's inclusion. |
+
+A zone that cannot be resolved is **recorded** with `fetch_status`, so it is not
+retried every run and the resulting map gap is explainable rather than mysterious.
+
+#### The fire-zone bug — the most consequential catch so far
+
+The first backfill logged 18 zone failures. They were not random: `IDZ403`,
+`NVZ425–427`, `ORZ670–675` — all high-numbered.
+
+**Cause:** a Z-prefixed zone id may be a **public forecast zone** *or* a **fire
+weather zone**, served on different API paths, and the id does not distinguish
+them. The original code mapped any `Z` to `forecast`.
+
+**Why it mattered disproportionately:** fire-weather zones are a different
+geography entirely — BLM districts and National Forests (`Burns BLM`, `Northern
+Boise National Forest`) — and **Red Flag Warnings and Fire Weather Watches are
+issued against them.** Guessing a single zone type silently lost geometry for
+precisely the alerts this system exists to reason about. 83 of 890 alerts were
+partially unmapped, concentrated in the smoke-relevant subset.
+
+**Fix:** a fallback chain per id shape rather than a single inferred type
+(`Z` → forecast, fire, coastal, offshore; `C` → county), recording which type
+succeeded. The API exposes five types: public 1058, fire 950, county 674,
+coastal 240, offshore 78; `forecast` is a path alias for `public`.
+
+**Result after re-resolution:**
+
+| Metric | Before | After |
+|---|---|---|
+| Zone-coded alerts with geometry | 119/146 | **146/146** |
+| Partially resolved | 83 | **1** |
+| Red Flag Warnings with geometry | 0/18 | **18/18** |
+| Fire Weather Watches with geometry | 0/10 | **10/10** |
+
+**A genuine permanent gap, correctly identified:** `BCZ096`–`BCZ099` resolve
+under no zone type. These are British Columbia zones that NWS references for
+cross-border coordination but does not publish geometry for. They are recorded
+as `not_found` — consistent with the Canadian portion of scope having no
+advisory coverage, and surfaced rather than hidden.
+
+#### Verified state after Step 3
+
+890 alerts over 7 days, all with geometry. 467 Alert / 359 Update / 64 Cancel,
+423 carrying amendment references. 425 zones cached (331 forecast, 80 county,
+14 fire), 4 unresolvable. Storage: `nws_zones` 12 MB — unexpectedly the largest
+table, because full-fidelity polygons total 672,000 points. Total database
+34 MB against the 500 MB ceiling.
+
 ## Decision 4 — Storage and hosting
 
 Candidate infrastructure was verified against current pricing and feature documentation
@@ -829,6 +940,8 @@ the first route or component is written.
 | 3g | Dedupe key | Raw published strings, empirically validated | Parsed floats rounded to 5dp |
 | 3h | Fire scope | Bbox filter at ingest (reversed from store-all) | Store all, filter at query |
 | 3i | Regional overlap | Dedupe key absorbs it; keep both region feeds | Drop the Canada feed |
+| 3j | NWS retention | Accept the 2020 advisory gap, surface it explicitly | Move the seed to a recent window |
+| 3k | Zone geometry | Lazy fetch + permanent cache, type fallback chain | Pre-load all 601 zones |
 | 4a | Store | Neon Postgres + PostGIS | ClickHouse Cloud (no durable free tier) |
 | 4d | DB drivers | `pg` for scripts, `@neondatabase/serverless` for routes | One driver everywhere |
 | 4b | Ingestion trigger | GitHub Actions cron | Vercel Cron (daily-only on Hobby) |

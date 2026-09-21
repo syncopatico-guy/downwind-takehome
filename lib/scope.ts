@@ -139,3 +139,33 @@ export function floorToHourUtc(d: Date): Date {
   out.setUTCMinutes(0, 0, 0);
   return out;
 }
+
+/**
+ * Alert types this product treats as smoke- or fire-relevant.
+ *
+ * Deliberately a QUERY-TIME concept rather than a schema column: relevance is
+ * a product judgement that may change, whereas the stored alert is a faithful
+ * record of what NWS published. All event types are ingested; this list drives
+ * emphasis in the UI and the agent's default focus.
+ *
+ * Dust types are included because the PM10/PM2.5 ratio distinguishes coarse
+ * blowing dust from fine combustion smoke -- an active dust advisory is
+ * corroborating evidence when the agent judges which of the two it is seeing.
+ */
+export const SMOKE_RELEVANT_EVENTS = [
+  'Air Quality Alert',
+  'Dense Smoke Advisory',
+  'Air Stagnation Advisory',
+  'Red Flag Warning',
+  'Fire Weather Watch',
+  'Extreme Fire Danger',
+  'Fire Warning',
+  'Blowing Dust Advisory',
+  'Blowing Dust Warning',
+  'Dust Advisory',
+  'Dust Storm Warning',
+] as const;
+
+export function isSmokeRelevantEvent(event: string): boolean {
+  return (SMOKE_RELEVANT_EVENTS as readonly string[]).includes(event);
+}
