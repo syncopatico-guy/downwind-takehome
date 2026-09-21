@@ -1,0 +1,843 @@
+# Downwind — Architecture & Technology Decision Record
+
+**Project:** A natural-language interface for exploring wildfire smoke and air quality
+across Western North America, using five real-time data feeds.
+
+**Purpose of this document:** A grounded record of every significant product and
+technical decision, the alternatives that were considered, and the reasoning that
+selected one over the others. It is maintained continuously as the build proceeds.
+
+**Status:** Live document. Last updated at end of **Step 2** (FIRMS ingester).
+
+---
+
+## Contents
+
+1. [Reading the brief](#1-reading-the-brief)
+2. [Decision 1 — The question](#decision-1--the-question)
+3. [Decision 2 — Data feeds, scope, and historical seeding](#decision-2--data-feeds-scope-and-historical-seeding)
+4. [Decision 3 — Data model](#decision-3--data-model)
+5. [Decision 4 — Storage and hosting](#decision-4--storage-and-hosting)
+6. [Decision 5 — The agent](#decision-5--the-agent)
+7. [Decision 6 — The interface](#decision-6--the-interface)
+8. [Decision 7 — Risk posture and cut order](#decision-7--risk-posture-and-cut-order)
+9. [Open items](#open-items)
+10. [Decision log summary](#decision-log-summary)
+
+---
+
+## 1. Reading the brief
+
+Six requirements were stated explicitly:
+
+| # | Requirement | Source |
+|---|---|---|
+| 1 | Three or more real-time feeds around one coherent question | Technical |
+| 2 | Ingestion, storage, and query backend | Technical |
+| 3 | Web interface with NL queries over real-time *and* historical data | Technical |
+| 4 | Interactive timeline for replaying change | Technical |
+| 5 | At least one meaningful part uses a technology new to the author | Deliverable |
+| 6 | Deployed online, accessible by shared URL | Deliverable |
+
+Three further requirements were identified in the prose rather than the bullet lists.
+These drove architecture more than the explicit bullets did:
+
+**Following evidence to its source.** A provenance requirement. Every figure the system
+states must be traceable to a specific record with a timestamp and an upstream link.
+Provenance therefore had to be a first-class part of the data model rather than a
+retrofitted annotation.
+
+**Clear treatment of stale, missing, or conflicting data.** The word *conflicting* is
+significant: conflict only arises when two feeds describe the same phenomenon. This
+turned out to be a hint about feed selection — deliberately overlapping sources create
+something to demonstrate rather than something to apologise for.
+
+**Queries feel interactive and the timeline scrubs smoothly.** A per-frame round trip to
+a database cannot deliver smooth scrubbing. This forced both pre-aggregated
+time-bucketed storage and, ultimately, a client-side query engine (see Decision 4c).
+
+### The scheduling constraint that shaped everything
+
+Several feeds named in the brief are annotated *"historical data is generally
+unavailable"* (GBFS, GTFS-Realtime, OpenSky, aisstream). Requirement 4 asks for replay
+of history. For any live-only feed, **the archive exists only if our own collector has
+been running** — which cannot be fixed by working harder near the deadline.
+
+With a **three-day budget**, this ruled out a design resting on live-only feeds: the
+timeline would have been roughly 48 hours deep, partly recorded while the schema was
+still changing. The chosen shape is a hybrid: feeds that ship a real historical archive
+give the timeline depth from first deploy, while live capture proves the real-time
+requirement and builds forward history.
+
+It also fixed the build order — ingestion first, ahead of the agent and the interface.
+
+### Explicitly out of scope per the brief
+
+Authentication, user accounts, permissions, identity management; test-coverage
+percentages and style-guide compliance.
+
+One consequence is worth noting: a public URL with an LLM behind it is an unbounded cost
+surface. A simple rate limit is not identity management — it is cost control.
+
+---
+
+## Decision 1 — The question
+
+### Chosen
+
+> **Where is wildfire smoke degrading air quality right now, which fires are
+> responsible, and where is it heading next?**
+
+### Alternatives considered
+
+| Option | Feeds | Why rejected |
+|---|---|---|
+| **River flood risk** — "where is water rising faster than the rain explains?" | USGS streamflow, Open-Meteo precipitation, NWS flood alerts | Safest data quality in the brief and the deepest archive, but USGS streamflow is a *dominant feed* that carries most of the answer by itself, weakening the case for a multi-feed join. Also depends on an active rain event and covers well-trodden ground. |
+| **Coastal storm surge** — "where is water higher than the tide predicts?" | NOAA Tides & Currents, NDBC buoys, NWS, Open-Meteo | The most elegant derived metric available (NOAA publishes both predicted *and* observed water level, so surge is a real residual rather than an invented one), and 6-minute cadence scrubs beautifully. Rejected because it is strongly event-dependent: with no active storm the demo is flat. |
+| **Weather and city movement** — how rain and cold reshape bike share and transit | GBFS, GTFS-Realtime, Open-Meteo | Most enjoyable and a good fit with more runway. Rejected on three counts: no movement feed has history, so the timeline would be ~48h deep; GTFS-Realtime protobuf parsing is a material time cost; and "human patterns" strains the brief's "physical and natural world" framing. |
+
+### Reasoning for the selection
+
+1. **It is the only candidate where the answer is impossible without joining all three
+   feeds.** A fire's location is meaningless for human health without a wind field to
+   transport the smoke and a downwind sensor to measure the result. In the flood and
+   surge candidates, one feed dominates.
+2. **Archive depth exists on day one** — see Decision 2.
+3. **The conflict story is intrinsic, not manufactured.** OpenAQ aggregates
+   reference-grade regulatory monitors alongside low-cost sensors that disagree
+   systematically; satellite fire detection produces genuine false positives (gas flares,
+   industrial heat).
+4. **The evidence chain is the strongest available**: claim → station reading → satellite
+   detection → upstream API.
+5. **It does not depend on a single weather event** — something is always burning
+   somewhere.
+
+### Known weakness, accepted deliberately
+
+Smoke attribution is a **modelling claim, not a measurement**. This is treated as an
+asset rather than a flaw: it obliges the agent to express calibrated uncertainty, which
+is precisely what the "reliable, grounded answers" criterion tests. The system presents
+attribution as a hypothesis with attached evidence, never as established fact.
+
+---
+
+## Decision 2 — Data feeds, scope, and historical seeding
+
+### 2a. Feed roster — five feeds, four of them keyless
+
+All five were verified live before selection rather than trusted from the brief's link
+list.
+
+| Feed | Role | Kind | Key | Verified status |
+|---|---|---|---|---|
+| **NASA FIRMS** (VIIRS) | Where it is burning, and how hard | observation | none | 1,932 CONUS detections in 24h; **10,786 over 7 days** |
+| **OpenAQ v3** | What people are actually breathing | observation | required | HTTP 401 without key |
+| **Open-Meteo Forecast** | Wind vector — where the smoke goes | model | none | Live; archive to 1940 |
+| **Open-Meteo Air Quality (CAMS)** | Modelled PM2.5 — a second estimate of the same quantity | model | none | Live, PM2.5 + US AQI |
+| **NWS Alerts** | What officials have declared | advisory | none (UA only) | Live; 111 alert types |
+
+Each feed is load-bearing. FIRMS locates and quantifies the source; Open-Meteo wind
+provides transport; OpenAQ provides ground truth; CAMS provides an independent estimate
+of the same quantity as OpenAQ, creating a model-versus-measurement conflict axis; NWS
+provides official human judgement, which can conflict with both.
+
+**Verification findings that changed the design:**
+
+- **FIRMS requires no API key and ships a 7-day archive.** The keyless regional CSVs
+  returned 10,786 detections across a clean eight-day histogram. This substantially
+  defused the three-day history problem — the fire timeline has a week of depth before
+  our collector records anything.
+- **The data-quality levers are real, not hypothetical.** Every detection carries
+  `confidence` (1,776 nominal / **83 low** / 73 high) and `frp` (fire radiative power;
+  mean 6.3 MW, max 161.7 MW). Low-confidence detections are therefore flaggable as
+  probable false positives, and fires can be weighted by intensity rather than counted
+  equally — a 0.5 MW agricultural burn is not the same input as an 85 MW crown fire.
+- **A day/night split** (1,494 night / 438 day) explains detection *gaps*: a fire burns
+  continuously but is only observed on satellite overpass. This is a genuine missing-data
+  case the agent must handle honestly rather than interpolate over.
+- **OpenAQ v2 is dead** (HTTP 410) and **AirNow also requires a key** (401). OpenAQ v3
+  with a free key is retained because it is the only feed providing a *named physical
+  station with coordinates and a provider tier* — which is what "follow evidence to its
+  source" concretely means.
+
+### 2b. Geographic scope — Western North America
+
+**Chosen:** CA, OR, WA, NV, ID, MT, UT, AZ, plus British Columbia and Alberta.
+
+| Alternative | Why rejected |
+|---|---|
+| **All CONUS + Canada** (~2,400 detections/day) | Viable and gives full NWS coverage plus southeast US agricultural burning as a contrast case. Rejected as unnecessary volume and map work for no gain in answer quality. |
+| **Global, multiple theatres** (~45,000/day) | Has by far the most dramatic activity — South America alone returned 23,666 detections in 24 hours during Amazon burning season. Rejected because the volume is unmanageable in three days, OpenAQ station coverage in the Amazon is sparse (which collapses the join), and there is no non-US equivalent of the NWS alert feed. |
+
+**Reasoning:** all five feeds function in this scope; OpenAQ coverage is dense; NWS
+covers the US portion; volume (~700 detections/day) is right-sized for the budget; and
+live activity was confirmed present at selection time — a cluster at **37.62N −119.61W
+(Sierra Nevada, near Yosemite) at 85 MW**, and another at **49.8N −121.5W (southern
+British Columbia) at 68 MW**.
+
+**Accepted limitation:** NWS alerts are US-only, so the Canadian portion of the scope has
+no advisory feed. This is surfaced in the UI rather than hidden.
+
+### 2c. Historical seeding — one episode
+
+**Chosen:** backfill the **7–16 September 2020 West Coast smoke event**, clearly labelled
+as historical.
+
+| Alternative | Why rejected |
+|---|---|
+| **Live data only** | Purest real-time story and least work. Rejected because the demo's impact would depend entirely on conditions during the review window — and at selection time the western US had **one** active NWS alert across eight states. The region was quiet. |
+| **Multiple seeded episodes** | Richest replay and the best stress test of the storage layer. Rejected on archive-API cost and the 0.5 GB storage ceiling (Decision 4a). |
+
+**Reasoning:** this decouples *"the system is live"* from *"the demo is dramatic."* Live
+ingestion satisfies the real-time requirement; the seeded episode guarantees the timeline
+replays something significant regardless of current conditions.
+
+September 2020 was chosen specifically because it is not decoration. It was the most
+extreme air-quality event in modern US record — Oregon and Washington PM2.5 exceeded
+500 µg/m³, beyond the top of the AQI scale — and its mechanism was a Labor Day east-wind
+event driving fire smoke into the Willamette Valley. That is exactly the
+fire → wind → station chain the attribution engine models, making it the **proof case for
+the attribution logic**, not merely a pretty replay.
+
+---
+
+## Decision 3 — Data model
+
+### 3a. Bitemporal timestamps — chosen
+
+Every observation carries two clocks:
+
+- `event_time` — when the phenomenon occurred (satellite acquisition; the sensor's hour)
+- `ingest_time` — when we first learned of it
+
+**Alternative rejected:** `event_time` only. Simpler schema and queries, one less concept
+in the UI.
+
+**Reasoning:** two clocks enable two distinct replays. Replay by *event time* answers
+"what was the air like at 3pm Tuesday," using everything known now. Replay by *ingest
+time* answers "what did we **know** at 3pm Tuesday" — showing that a fire was invisible
+to us because the satellite had not yet passed. That converts "clear treatment of stale
+and missing data" from a disclaimer into a feature that can be scrubbed through.
+
+The decisive argument was asymmetric cost: it costs two columns now and is **impossible
+to add retroactively.** Three days of ingestion without `ingest_time` would permanently
+destroy that history.
+
+Implementation: `"what did we know at T"` is the predicate `WHERE ingest_time <= T`.
+
+### 3b. Layered raw + derived — chosen
+
+**Raw** tables preserve full upstream fidelity and are **append-only**; **derived** tables
+serve fast queries and the agent's tool surface, and are **freely recomputable**.
+
+| Alternative | Why rejected |
+|---|---|
+| **Single unified observation table** | One query path, one agent tool, trivial provenance. Rejected for sparse wide rows, loss of type safety, and poor handling of alert polygons and multi-parameter records. |
+| **Per-feed tables only** | Least transformation work, most natural per-feed fit. Rejected because the agent would need five separate tools with every cross-feed join hand-written, increasing both latency and agent error rate. |
+
+**Reasoning:** raw keeps provenance exact; derived keeps queries fast and the tool surface
+small; and the split gives a clear scaling story with responsibility boundaries. In
+implementation the raw/derived split is also a **mutability boundary**, which makes the
+layering enforceable rather than aspirational.
+
+### 3c. Revisions without updates — implementation decision
+
+Because raw tables are append-only, upstream corrections cannot overwrite. Each raw table
+carries a `UNIQUE` constraint that includes a **hash of the value**:
+
+- Re-reading an unchanged value conflicts and is discarded (`ON CONFLICT DO NOTHING`).
+- A **changed** value inserts a new row with a later `ingest_time`.
+
+This captures FIRMS reprocessing (NRT → science-processed, distinguished by
+`proc_version`) and OpenAQ late corrections as *history* rather than loss. "Latest known"
+is the row with the greatest `ingest_time` per `observation_key`.
+
+### 3d. Entity resolution — fire clustering, chosen
+
+1,932 detections are not 1,932 fires; the Yosemite cluster alone is roughly 186 detections
+of one complex. Detections are clustered spatio-temporally into `fire_clusters` carrying
+**stable IDs that survive ingest runs.**
+
+**Reasoning:** this lets the agent say *"the Yosemite complex, which grew 40% since
+Thursday"* rather than *"detections in a region"* — the difference between a product and a
+data dump. The hard part, acknowledged, is ID stability as fires grow and merge.
+
+### 3e. Fire-to-station attribution — upwind cone, chosen
+
+For each station-hour, look upwind along the wind vector and find fire clusters within a
+cone; weight by fire radiative power and distance.
+
+| Alternative | Why rejected |
+|---|---|
+| **Clustering plus bare correlation** ("fires nearby, PM2.5 elevated") | Several hours cheaper and makes no indefensible claims. Rejected because it leaves *"which fires are responsible"* — the core of the chosen question — largely unanswered. |
+| **Full plume dispersion model** | Physically strongest. Rejected as multiple days of work, unavailable in a 72-hour budget. |
+| **Forward plume projection** (answering "where next" by projecting along forecast winds) | Strongest answer to the complete question. Deferred, not rejected outright, as the highest modelling risk in the budget. |
+
+**Reasoning:** physically motivated, fully explainable, and each attribution row carries
+**its own evidence** — contributing fires, wind alignment, distance, intensity, travel
+time — so the agent shows its work. Attribution is always presented as a hypothesis with
+evidence, never as fact. `method_version` is stored so the method can be revised without
+discarding prior computations.
+
+### 3f. Multi-endpoint sources — `feed_variant` on `ingest_runs`
+
+**Context.** Verification established that all three VIIRS satellites (SNPP,
+NOAA-20, NOAA-21) publish keyless CSVs with an identical schema, across two
+regions — six endpoints in total behind one logical feed.
+
+| 24h rows | SNPP | NOAA-20 | NOAA-21 |
+|---|---|---|---|
+| USA | 1,952 | 1,639 | 1,992 |
+| Canada | 455 | 453 | 535 |
+| **7-day archive (USA)** | **10,806** | **10,343** | **10,743** |
+
+The combined 7-day archive is ~31,900 US detections plus Canada; roughly 15,000
+fall inside our bbox. Three satellites give ~6 overpasses per day rather than 2,
+which materially shrinks the blind windows between passes — directly serving the
+replay requirement.
+
+**Chosen:** keep `sources` at five rows and add a nullable `feed_variant` column
+to `ingest_runs` (e.g. `viirs_noaa21:canada`).
+
+| Alternative | Why rejected |
+|---|---|
+| **Three separate `source_id` rows** | Most transparent per-satellite provenance with no schema change. Rejected because the registry and UI would then advertise seven feeds, diluting the "five feeds, each load-bearing" framing. |
+| **One source, `satellite` column only** | No schema change at all. Rejected because health tracking becomes all-or-nothing: if one satellite's endpoint silently died, the health view would still report the source as fresh. |
+
+**Reasoning:** it preserves the clean five-feed narrative while keeping
+per-endpoint failure visible. The change was made while nothing had yet been
+ingested, when it was free; after ingestion began it would have been awkward.
+
+Consequence in the schema: **two** health views rather than one.
+`v_feed_variant_health` reports per endpoint; `v_source_health` rolls up
+**pessimistically** — a source is only as fresh as its weakest endpoint, because
+the alternative is claiming freshness we do not have.
+
+### 3g. Deduplication key — empirically validated
+
+Because raw tables are append-only and deduplicate on conflict, the identity key
+has to be exactly right. Rather than reason about it, it was measured against
+live data:
+
+- All **1,932** keys from the 24h feed appear **identically** in the 7-day feed
+  (zero mismatches) — so coordinates are republished byte-identical rather than
+  re-derived. The 7-day backfill and the ongoing cron therefore deduplicate
+  against each other correctly.
+- **Zero** duplicate keys within either feed, confirming the key is not too coarse.
+- Coordinate precision is ragged: 5 decimal places for 9,749 rows, but also 4, 3
+  and even 2 for others.
+
+**Decision:** compose `observation_key` from the **raw published field strings**
+(`lat|lon|acq_date|acq_time|satellite`), not from parsed and rounded floats. This
+is the form that was validated; rounding would have introduced avoidable risk for
+no benefit. `acq_time` was confirmed uniformly 4 characters (HHMM), so no ragged
+time parsing is needed.
+
+### Schema summary as implemented
+
+`db/migrations/001_init.sql`
+
+| Layer | Tables |
+|---|---|
+| **Registry** | `sources` (cadence, staleness threshold, latency, measurement kind), `ingest_runs` (provenance + gap backbone), `sample_points` |
+| **Raw, append-only** | `fire_detections`, `aq_stations`, `aq_measurements`, `weather_hourly`, `model_aq_hourly`, `alerts` |
+| **Derived, recomputable** | `fire_clusters`, `smoke_attributions`, `hourly_frames` |
+| **Health** | `v_source_health` view (backs the agent's `get_data_health` tool) |
+
+Three modelling choices inside the schema worth defending explicitly:
+
+- **`sources.measurement_kind`** is constrained to `observation` / `model` / `advisory`.
+  This is the axis along which feeds are *permitted* to disagree, making conflict a typed
+  property of the data rather than an application-layer special case.
+- **`model_aq_hourly` is a separate table from `aq_measurements`.** A model estimate and
+  an instrument reading are different kinds of claim; collapsing them into one table
+  would destroy the conflict signal that Requirement 3 asks us to surface.
+- **`alerts.geom` is nullable.** Many NWS products are zone-coded (UGC/SAME) with no
+  polygon. Rather than silently dropping them, they are stored with their zone codes as a
+  data-quality case the agent must be honest about.
+- **Gridded feeds are sampled at points, not on a dense grid.** `sample_points` holds
+  station locations, fire centroids, and a coarse background grid. Sampling a dense H3
+  grid over the region would have produced tens of thousands of rows per day for no gain
+  in answer quality, and would have breached the storage ceiling.
+
+---
+
+### 3h. Fire detection scope — decided, then reversed on better information
+
+This decision was made twice, and the reversal is recorded because the reasoning
+error is instructive.
+
+**First decision: store everything the feed returns, filter at query time.** The
+argument was asymmetry — fire detections are the cheapest table, and the live
+window is unrecoverable, so scope can always be narrowed later but never widened
+backwards. This is the same asymmetry that correctly decided the bitemporal
+question (Decision 3a).
+
+**What measurement then showed.** A dry run against all six live endpoints
+returned **8,119 detections in 24 hours**, of which only **3,017 (37%) fall
+inside the scope bbox.** This invalidated an estimate given earlier in planning:
+in-scope volume had been put at ~700/day, derived from a single satellite and a
+single region, where the true figure across three satellites and two regions is
+roughly four times that. The revised projection for `fire_detections` including
+the 2020 seed rose from 6–15 MB to **60–90 MB**, against a 500 MB ceiling with
+roughly 350–400 MB now projected in total.
+
+Measuring the geographic distribution also showed that an intermediate filter
+would not help: 80% of fetched rows lie west of −90°, so trimming only the
+eastern US saves 20%. The bulk of out-of-scope volume is Plains agricultural
+burning between −103° and −90°, not the east coast.
+
+| Filter | Share of feed |
+|---|---|
+| Scope bbox (31–60N, −128…−103) | 29% |
+| West of −90 | 80% |
+| East of −90 | 20% |
+| Hawaii | 2% |
+
+**The reasoning error.** The store-all argument rested on the live window being
+unrecoverable. **That premise does not hold for FIRMS.** FIRMS publishes a full
+archive through its keyed area API — the very mechanism being used to seed
+September 2020. Unlike GBFS or GTFS-Realtime, which genuinely have no history,
+nothing about FIRMS is lost by not storing it today. The asymmetry argument had
+been applied *by analogy* from the bitemporal decision without checking whether
+its premise transferred, and it did not.
+
+**Final decision: filter to the scope bbox at ingest**, with a
+`--no-scope-filter` escape hatch so a wider scope can be backfilled later.
+
+**Reasoning:** it cuts the largest raw table by 63%, freeing 40–60 MB of
+headroom for the attribution table — whose size is the hardest in the system to
+predict — and costs nothing permanent, because any historical window can be
+re-fetched.
+
+**Outstanding verification:** archive depth for the VIIRS science-processed
+product has not yet been confirmed against the keyed API. If it proves shallower
+than 2012–present, the scope filter should be widened as a hedge.
+
+**Implementation note:** filtering happens in the ingester, not the parser. The
+parser's contract is a faithful read of what the feed published, so its anomaly
+and rejection counts stay meaningful across the whole payload rather than a
+subset. Rows dropped by the scope filter are recorded in the run's `notes` as
+`dropped_out_of_scope` and deliberately **not** counted as `rows_rejected` —
+that field is reserved for malformed data and marks a run `partial`, and "this
+fire is in Texas" is not a defect.
+
+### 3i. Discovered: FIRMS regional files overlap
+
+The first backfill run reported duplicate rows against an *empty* table, which
+should be impossible. The arithmetic explained it: `811 + 840 + 908 = 2,559`
+duplicates, and `9,990 in-scope − 2,559 = 7,431` inserted.
+
+**Finding:** FIRMS' `USA_contiguous_and_Hawaii` region extends well north of the
+border and overlaps the `Canada` file. Roughly **72% of in-scope Canadian
+detections were already present** from the USA feed.
+
+**Why it matters:** the same physical detection published in two regional files
+is one observation, not two. Without the value-identity dedupe key (Decision
+3g), ~2,559 fires would have been silently double-counted, corrupting every FRP
+total, fire count and attribution weight downstream — and the error would have
+been invisible, because both copies are individually valid.
+
+The Canada endpoints are retained regardless: they contributed 1,039 detections
+the USA feed did not cover, in northern BC and Alberta.
+
+**Verified result of the first backfill:** 7,431 in-scope detections spanning 8
+days (2026-09-14 to 09-21), zero bbox violations, zero parse rejections, all six
+endpoints reporting `fresh`. Confidence distribution 6,714 nominal / 413 high /
+304 low; day/night 4,915 / 2,516.
+
+## Decision 4 — Storage and hosting
+
+Candidate infrastructure was verified against current pricing and feature documentation
+rather than assumed. Two fashionable options were eliminated by that verification.
+
+| Option | Verdict | Evidence |
+|---|---|---|
+| **ClickHouse Cloud** | Rejected | No permanent free tier. 30-day trial with $300 credits that **expire with the trial**, then ~$66/month minimum and ~$186/month running 24/7. Adequate for a review window, dead afterwards. |
+| **Supabase + TimescaleDB** | Rejected | TimescaleDB is deprecated on Postgres 17+ and cannot be enabled on new projects (TSL relicensing). `pg_cron` requires a background worker and is gated to Pro. |
+| **Neon + TimescaleDB** | Rejected | Only the Apache-2 edition is available; compression is explicitly unsupported and continuous aggregates are undocumented and likely TSL-gated — removing the main reason to choose it. |
+| **Neon + PostGIS** | **Chosen** | Free tier durable past the review window; PostGIS available. |
+
+### 4a. Store — Neon Postgres + PostGIS
+
+**Reasoning — the data is small, and that drove the choice.** Sizing the workload first:
+~700 fire detections/day, ~1,000–1,500 OpenAQ stations reporting hourly, weather and CAMS
+sampled at points, plus the attribution table. Across the FIRMS 7-day archive, the seeded
+2020 episode, and three days of live capture, this is on the order of **100–300 MB**.
+
+At that size neither ClickHouse nor TimescaleDB earns its complexity — plain Postgres with
+sensible indexes and materialised rollup tables serves every query in single-digit
+milliseconds. Selecting a time-series engine here would have been résumé-driven, and being
+able to say so plainly is worth more than the label.
+
+**Accepted constraint:** the Neon free tier is **0.5 GB**. Mitigations, designed in from
+the start: sample gridded feeds at points rather than on a dense grid; keep PM2.5 as the
+primary parameter; use narrow column types. If the 2020 seed threatens the ceiling, it
+narrows to Oregon and Washington — where the record readings occurred.
+
+### 4b. Ingestion trigger — GitHub Actions cron
+
+| Alternative | Why rejected |
+|---|---|
+| **Vercel Cron** | **Eliminated by verification.** The Hobby plan permits cron **once per day** with ±59 minute precision; more frequent expressions fail at deployment. Unusable for a ~10-minute ingester without upgrading to Pro. |
+| **Cloudflare Worker cron trigger** | Genuinely good: 1-minute granularity, reliable timing, five triggers free, reads as more production-grade. Rejected for the **50 external subrequests per invocation** cap on the free plan and the cost of learning a second runtime under deadline. |
+| **Long-running worker on a small VM** | Full control over scheduling, retries, and backfill with no platform caps. Rejected as the largest operational surface to build and monitor, for a few dollars a month. |
+
+**Reasoning:** a plain Node/TypeScript script with no subrequest cap, trivial to debug,
+and visible in the repository for reviewers.
+
+**Accepted cost:** GitHub Actions scheduling drifts and can be skipped under load. This is
+tolerable because `ingest_runs` logs every attempt with its intended event-time window —
+so a missed run makes the resulting gap **provable rather than silent.** Given that the
+system's data-quality thesis is honest treatment of gaps, a cron that occasionally skips
+is a demonstrable feature with a story attached.
+
+A batching technique adopted regardless of host: **Open-Meteo accepts comma-separated
+multi-location queries**, collapsing dozens of sample points into a single HTTP call.
+
+### 4d. Database drivers — two, each in its designed place
+
+**Chosen:** `pg` (node-postgres) for ingestion scripts and server-side jobs;
+`@neondatabase/serverless` for Next.js route handlers.
+
+**Reasoning:** the ingesters need long-lived pooling, real transactions and
+efficient multi-row inserts, which is what `pg` is built for.
+`@neondatabase/serverless` is built for serverless request/response and is the
+better fit inside route handlers. Standardising on one driver was considered and
+rejected: it would have meant accepting the wrong tool in one of the two places
+for the sake of a tidier dependency list.
+
+**Provenance made an invariant.** `lib/db.ts` exposes `withIngestRun`, which
+opens a run row, hands it to the caller, and closes it with its outcome —
+*including on throw*, where it is closed as `error` with the message. The run row
+is committed immediately on open, deliberately outside the caller's transaction:
+wrapping both together would roll back the very evidence of the failure. The
+effect is that a crashed ingester leaves an explanatory record rather than a
+silent hole, which is what lets the agent distinguish *"no fires were detected"*
+from *"we failed to look."*
+
+### 4c. The new technology — DuckDB-WASM + Parquet, client-side
+
+**Chosen:** precompute hourly frames, export them to a compact Parquet file, ship it to
+the browser, and query it client-side with DuckDB-WASM. The Node DuckDB bindings write
+the Parquet server-side, so the same engine appears on both ends.
+
+| Alternative | Why rejected |
+|---|---|
+| **DuckDB-WASM plus H3 spatial indexing throughout** | Stronger story if both landed, but two unfamiliar technologies on a 72-hour clock. H3 is still used for bucketing, but is not the showcase. |
+| **Self-hosted ClickHouse as the engine** | Strongest scaling narrative and a natural fit for append-only bitemporal data, with native H3 functions. Rejected as the highest risk of consuming a day that does not exist, plus ongoing hosting cost. |
+
+**Reasoning, and why this placement is defensible rather than decorative:** the real
+performance problem in this system **is not the database.** It is the scrub. Every
+timeline position needs a frame, and a round trip to Postgres per frame costs 50–150 ms —
+which feels like molasses while dragging a handle, especially for a reviewer far from the
+database region.
+
+Moving the frames into the browser makes scrubbing **zero-latency**, because it never
+touches the network. Postgres remains the bitemporal source of truth that the agent
+queries for precision; the browser holds an analytical replica for interaction. That is a
+clean read/write path separation, it is justified by a stated requirement rather than by
+novelty, and its blast radius is contained — if DuckDB-WASM misbehaves, the timeline falls
+back to server queries and nothing else breaks.
+
+---
+
+## Decision 5 — The agent
+
+### Governing principle: the model never performs arithmetic
+
+If the model computes *"PM2.5 is 3.2× the baseline,"* it will occasionally be wrong, and a
+wrong number is fatal in a grounded-answer product. If a tool returns
+`{value: 47.2, baseline: 14.8, ratio: 3.19}` and the model only composes prose around it,
+the number is always right. Every quantity in a final answer originates in a tool result.
+
+### 5a. Data access — curated tools only
+
+**Chosen:** nine parameterised tools; no raw SQL surface.
+
+| Tool | Purpose |
+|---|---|
+| `resolve_place` | Resolve "Portland", "the Sierra", "near Yosemite" to coordinates and bbox |
+| `get_air_quality` | Station readings — observed **and** modelled, side by side |
+| `get_fires` | Fire clusters and detections, filterable by FRP and confidence |
+| `get_wind` | Wind vector series for a place and time range |
+| `get_alerts` | NWS alerts, active or historical |
+| `explain_smoke` | Attribution: contributing fires, wind alignment, distance, score |
+| `compare_time` | Change between two moments |
+| `rank_places` | "Where is the worst air right now" |
+| `get_data_health` | Per-feed freshness, last successful ingest, known gaps |
+
+| Alternative | Why rejected |
+|---|---|
+| **Curated tools + sandboxed read-only SQL** | More flexible and more impressive live. Rejected for weaker grounding guarantees and a real surface to secure, against a "reliable, grounded answers" bar. |
+| **Text-to-SQL as the primary path** | Maximum flexibility. Rejected for unbounded queries that can exhaust the database, hallucinated columns, and citations that cannot be guaranteed. |
+
+**Accepted cost:** questions outside the tool surface receive an honest *"I can't answer
+that."* This is considered correct behaviour, not a limitation.
+
+### 5b. The provenance envelope
+
+Every tool returns the same wrapper, which is where provenance and data quality live:
+
+```ts
+{
+  data: [...],
+  provenance: { source_id, source_url, record_ids[], event_time_range, ingest_time, row_count },
+  quality: { as_of, age_seconds, is_stale, gaps: [{start, end, reason}], conflicts: [...] }
+}
+```
+
+The three data pathologies map onto it directly:
+
+- **Stale** → `age_seconds` compared against the feed's declared `staleness_seconds`.
+- **Missing** → explicit `gaps` with reasons such as *"no VIIRS overpass 06:00–18:00"*, so
+  the agent states the gap rather than interpolating across it.
+- **Conflicting** → `get_air_quality` returns OpenAQ, CAMS, and alert status together with
+  a `conflicts` flag when they diverge, so the agent surfaces disagreement instead of
+  silently selecting a winner.
+
+### 5c. The bitemporal payoff — `as_of`
+
+Every tool accepts an optional `as_of`. The default is *now* (best current knowledge).
+When the user scrubs the timeline to a past moment and asks a question, the interface
+passes that position as `as_of`, and **the agent answers as the world was known then.**
+
+This is the single choice that makes the timeline and the conversation *one instrument*
+rather than two features sharing a page, and it is only possible because Decision 3a chose
+bitemporal storage.
+
+### 5d. Agent loop — SDK Tool Runner
+
+**Chosen:** `client.beta.messages.toolRunner`.
+
+| Alternative | Note |
+|---|---|
+| **Manual tool-use loop** | Was the original recommendation: ~40 lines, fully predictable, no beta dependency, precise control over the SSE event protocol. Not selected. |
+| **Managed Agents** | Anthropic hosts the loop and a per-session sandbox. Rejected because no sandbox is needed, the tools query our own Postgres, and it adds latency and concepts the system does not require. |
+
+**Reasoning for the selection:** materially less code, with per-turn hooks available for
+logging and interception.
+
+#### A verified incompatibility and its resolution
+
+Documentation confirms that **structured outputs are produced by
+`client.messages.parse()`, a different method from `client.beta.messages.toolRunner()`**;
+there is no documented way to pass `output_config.format` to the Tool Runner. Decisions 5d
+and 5e therefore do not compose directly.
+
+**Resolution — two-phase, splitting the work the way the task splits:**
+
+1. **Gather.** `toolRunner({ ...params, stream: true })` drives the tool loop, streaming
+   per-tool progress to the interface ("checking 47 stations…"). Evidence accumulates in
+   the message history.
+2. **Compose.** One `client.messages.parse()` call over that accumulated history with
+   `zodOutputFormat(ClaimsSchema)`, producing the typed claims-and-citations object.
+
+This is preferable to a workaround rather than merely acceptable: because composition is a
+separate call, **every citation ID in the output can be validated against the record IDs
+the tools actually returned, and the compose step retried alone** if a claim came back
+uncited — without re-running any tool work. Citation integrity becomes enforcement rather
+than a prompt instruction, and the retry is cheap because the gather history is cached.
+
+**Two documented pitfalls carried into implementation:** with `stream: true`, each runner
+iteration yields a *stream* rather than a message, so a bare `stop_reason` check silently
+never fires; and `parsed_output` is `null` on parse failure, requiring a guard rather than
+an assertion.
+
+### 5e. Grounded output — structured claims with citations
+
+**Chosen:** the answer returns as typed claims, each carrying citation record IDs, which
+the interface renders as clickable evidence chips.
+
+**Alternative rejected:** prose with inline `[ref:...]` markers. More fluid and
+human-sounding writing, but citation completeness becomes best-effort rather than
+verifiable.
+
+**Reasoning:** it permits programmatic rejection and retry of any uncited claim.
+
+**Accepted cost, stated honestly:** the final answer cannot stream as progressive prose,
+because complete JSON is required to parse it. Latency sits mostly in the gather phase, so
+the experience becomes "watch the agent work, then the answer lands" — which arguably
+reads as more trustworthy than text typing itself out.
+
+### 5f. Model and latency posture
+
+**Chosen:** `claude-opus-5` (1M context; $5 / $25 per MTok) with **effort routing** —
+`effort: "low"` for single-fact lookups, `"high"` for multi-hop attribution questions.
+
+| Alternative | Why rejected |
+|---|---|
+| **Opus 5 fast mode** | Up to 2.5× output speed for the most responsive feel. Rejected on premium pricing ($10 / $50 per MTok) and research-preview status requiring a separate rate-limit fallback path. |
+| **Sonnet 5** | $2 / $10 per MTok and lower default latency, cheaper to iterate against. Rejected for reduced reasoning quality on the harder multi-hop attribution questions, which are the system's core value. |
+
+Supporting settings: adaptive thinking (`thinking: {type: "adaptive"}`); streaming
+throughout; prompt caching on the stable prefix (tool definitions and system prompt are
+large and frozen, so caching cuts both latency and cost materially); **server-side refusal
+fallbacks** (`fallbacks: "default"`) so a classifier decline degrades gracefully rather
+than returning an empty answer; and `eager_input_streaming` on client tools with schema
+validation on every parsed tool input, since the tolerant parser can return a silently
+truncated object.
+
+### 5g. Verification — golden question set
+
+A ~20-question set covering expected tool calls, expected groundedness, and expected
+**refusals** for questions the data cannot answer. This is the clearest single signal
+separating a production agent from a demo. Scheduled as a day-3 stretch goal, and first in
+the cut order (Decision 7).
+
+---
+
+## Decision 6 — The interface
+
+The brief asks for *"a single interface for exploring questions in natural language,
+following evidence to its source, and replaying change over time."* The word **single** is
+doing work. The map, timeline, and conversation are therefore designed as **one
+instrument**: asking a question moves the map and the clock, and scrubbing the clock
+changes what the agent knows via `as_of`. Anything less would be three widgets on a page.
+
+### 6a. Layout — map-dominant, with docked chat and timeline
+
+Map fills the view; the timeline spans the bottom and is permanently visible; chat docks
+to one side.
+
+| Alternative | Why rejected |
+|---|---|
+| **Conversation-dominant, map as answer artifact** | Makes the agent the star and the NL requirement unmissable. Rejected because the timeline becomes secondary and replay feels bolted on. |
+| **50/50 split-pane** | Honours both requirements literally and is simple to build. Rejected because neither side gets enough room and it reads as two tools stapled together. |
+
+**Reasoning:** spatial data reads best this way, and a permanently visible timeline is
+what the replay requirement is actually asking for.
+
+### 6b. Map stack — MapLibre GL
+
+| Alternative | Why rejected |
+|---|---|
+| **deck.gl over MapLibre** | GPU-accelerated layers built for large point clouds with strong animated transitions, which would suit plume replay. Rejected as more power than ~700 points and ~1,500 stations require, plus another library to learn on the clock. |
+| **Leaflet** | Simplest and fastest to wire up. Rejected as raster-oriented with jerkier animation — weak at exactly the smooth continuous transitions the scrubbing criterion grades. |
+
+**Reasoning:** open source, no API token, no billing surprises, vector tiles, smooth
+animation, and comfortably sufficient for our data volume.
+
+### 6c. Cold open — seeded state plus example questions
+
+The interface lands on a live view already centred on real activity, with three or four
+clickable example questions and the timeline pre-positioned at the seeded episode.
+
+| Alternative | Why rejected |
+|---|---|
+| **Guided tour walkthrough** | Most controlled demo, guarantees the best features are seen. Rejected on build time and because it can read as a canned pitch. |
+| **Empty state with a prompt box** | Clean and confident, lowest build cost. Rejected because it makes the reviewer guess the system's capabilities, and one poor first question makes a good system look weak. |
+
+**Reasoning:** a reviewer opening the URL cold sees the system working within seconds,
+without typing.
+
+---
+
+## Decision 7 — Risk posture and cut order
+
+### Build order
+
+Ingestion precedes everything. Phase 0 targets **data accumulating within three hours**,
+because every hour of delay is an hour of history that cannot be recovered later.
+
+| Phase | Work |
+|---|---|
+| **Phase 0** (first 2–3 h) | Repo, Neon provisioned, schema migrated, three keyless ingesters (FIRMS, Open-Meteo, NWS) live on GitHub Actions cron |
+| **Day 1 remainder** | OpenAQ + CAMS ingesters, fire clustering, hourly frames rollup, FIRMS 7-day and Open-Meteo archive backfill, seed the 2020 episode |
+| **Day 2** | Upwind-cone attribution engine; the agent — nine tools, gather loop, compose call, citation validation, query routes |
+| **Day 3** | Map, timeline, DuckDB-WASM Parquet path, chat panel, evidence drawer, freshness strip; deploy; cold-open seeding; this document |
+
+### Identified risks
+
+| Risk | Mitigation |
+|---|---|
+| **The schema must be correct first time** — a change on day 2 costs the accumulated history, the one thing that cannot be rebought | Bitemporal and provenance columns settled in Phase 0; additive changes only thereafter |
+| **OpenAQ key latency** | Build the four keyless feeds first so the key is never on the critical path |
+| **DuckDB-WASM is the new technology, therefore the unknown** | Hard timebox on day 3 with a server-query fallback behind it |
+| **2020 seed size versus the 0.5 GB ceiling** | Narrow the seed to Oregon/Washington if threatened |
+| **GitHub Actions cron drift** | `ingest_runs` logs every attempt, making gaps provable rather than silent |
+
+### Cut order under time pressure
+
+1. **Golden-question eval set** (Decision 5g)
+2. **DuckDB-WASM** — falls back to server queries; the timeline still scrubs, over the network
+
+| Alternative cut order | Why rejected |
+|---|---|
+| **Cut the seeded 2020 episode first** | Would protect the new technology and agent verification, but reintroduces exactly the event-dependency that seeding was chosen to eliminate. |
+| **Cut attribution depth first** | Saves the most hours by far, but guts *"which fires are responsible"* — the core of the chosen question. |
+
+**Reasoning:** protect the visible product and keep every graded requirement demonstrably
+working; lose polish and the new-technology showcase before losing a requirement.
+
+---
+
+## Open items
+
+### Blocking — required to proceed
+
+| Item | Where | Needed for |
+|---|---|---|
+| **Neon connection string** | neon.tech — create project | Running the migration; all ingestion |
+| **OpenAQ API key** | explore.openaq.org | The ground-sensor feed |
+| **FIRMS `MAP_KEY`** | firms.modaps.eosdis.nasa.gov/api/map_key | The 2020 seed (keyless CSVs only reach back 7 days) |
+| **Anthropic API key** | console.anthropic.com | The agent (day 2) |
+| **GitHub repository** | `gh` CLI is not installed on this machine | GitHub Actions cron |
+
+### Deferred decisions
+
+- **Forward plume projection** ("where is it heading next") — deferred as the highest
+  modelling risk; the question is currently answered by wind direction and forecast rather
+  than by projected dispersion.
+- **Rate limiting on the public agent endpoint** — cost control, not authentication.
+- **Project name** — currently *Downwind*, chosen provisionally for the transport
+  mechanism and the human stake. Not yet confirmed.
+
+### Environment as verified
+
+Node v22.22.2 · npm 10.9.7 · git 2.50.1 · **no `gh`** · **no `psql`** · **no Docker,
+Podman or local Postgres** (migrations therefore run through a Node script, which is
+more portable regardless).
+
+One consequence worth stating: with no local Postgres engine available, the migration
+SQL is **unvalidated until it first runs against Neon.** This is acceptable rather than
+risky because the migration runner wraps each file in its own transaction — a syntax
+error rolls back cleanly and re-runs after a fix, leaving earlier migrations applied. Next.js scaffolded with
+TypeScript, Tailwind, ESLint, App Router, no `src/` directory.
+
+**Note on the Next.js version in use:** the project's `AGENTS.md` states this is a
+modified Next.js with breaking changes from common knowledge, and requires reading
+`node_modules/next/dist/docs/` before writing application code. This is respected before
+the first route or component is written.
+
+---
+
+## Decision log summary
+
+| # | Decision | Chosen | Principal alternative rejected |
+|---|---|---|---|
+| 1 | The question | Wildfire smoke → air quality | River flood risk |
+| 2a | Feed roster | FIRMS, OpenAQ, Open-Meteo wind, CAMS, NWS (5 feeds, 4 keyless) | Three-feed minimum |
+| 2b | Geographic scope | Western North America | Global multi-theatre |
+| 2c | Historical seeding | One episode — Sept 2020 West Coast | Live data only |
+| 3a | Time model | Bitemporal (`event_time` + `ingest_time`) | `event_time` only |
+| 3b | Layering | Raw append-only + derived recomputable | Single unified observation table |
+| 3c | Revisions | Value-hash in UNIQUE key; new row per revision | In-place update |
+| 3d | Entity resolution | Fire clustering with stable IDs | Raw detections only |
+| 3e | Attribution | Upwind cone, FRP + distance weighted | Bare correlation |
+| 3f | Multi-endpoint sources | `feed_variant` on `ingest_runs`, 5 clean source rows | Three separate `source_id` rows |
+| 3g | Dedupe key | Raw published strings, empirically validated | Parsed floats rounded to 5dp |
+| 3h | Fire scope | Bbox filter at ingest (reversed from store-all) | Store all, filter at query |
+| 3i | Regional overlap | Dedupe key absorbs it; keep both region feeds | Drop the Canada feed |
+| 4a | Store | Neon Postgres + PostGIS | ClickHouse Cloud (no durable free tier) |
+| 4d | DB drivers | `pg` for scripts, `@neondatabase/serverless` for routes | One driver everywhere |
+| 4b | Ingestion trigger | GitHub Actions cron | Vercel Cron (daily-only on Hobby) |
+| 4c | New technology | DuckDB-WASM + Parquet, client-side scrub | Self-hosted ClickHouse |
+| 5a | Data access | Nine curated tools, no raw SQL | Text-to-SQL |
+| 5d | Agent loop | SDK Tool Runner, two-phase with compose | Manual loop |
+| 5e | Grounded output | Structured claims + citations | Prose with inline markers |
+| 5f | Model | `claude-opus-5`, effort routing | Sonnet 5 |
+| 6a | Layout | Map-dominant, docked chat + timeline | Conversation-dominant |
+| 6b | Map stack | MapLibre GL | deck.gl |
+| 6c | Cold open | Seeded state + example questions | Empty state |
+| 7 | Cut order | Eval set, then DuckDB-WASM | Cut seeded episode |
