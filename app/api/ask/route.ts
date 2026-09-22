@@ -89,7 +89,7 @@ export async function POST(req: NextRequest) {
           question,
           model,
           asOf: body.as_of,
-          effort: body.effort ?? 'high',
+          effort: body.effort,
           onProgress: (e) => send('progress', e),
         });
 
@@ -108,6 +108,8 @@ export async function POST(req: NextRequest) {
           output_tokens: result.usage.output_tokens,
           cache_read_tokens: result.usage.cache_read_input_tokens,
           cost_usd: result.usage.estimated_cost_usd,
+          effort: result.effort,
+          effort_reason: result.effort_reason,
           error: result.error,
         });
       } catch (err) {

@@ -96,6 +96,8 @@ export interface AskLogRow {
   output_tokens?: number;
   cache_read_tokens?: number;
   cost_usd?: number;
+  effort?: string;
+  effort_reason?: string;
   error?: string;
 }
 
@@ -111,8 +113,8 @@ export async function logAsk(row: AskLogRow): Promise<void> {
     await tq(
       `INSERT INTO ask_log (client_hash, question, model, ok, refused, tool_calls,
                             claim_count, citation_count, compose_attempts, elapsed_ms,
-                            input_tokens, output_tokens, cache_read_tokens, cost_usd, error)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+                            input_tokens, output_tokens, cache_read_tokens, cost_usd, effort, effort_reason, error)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
       [
         row.client_hash, row.question.slice(0, 2000), row.model ?? null,
         row.ok, row.refused ?? false, row.tool_calls ?? null,
@@ -120,6 +122,7 @@ export async function logAsk(row: AskLogRow): Promise<void> {
         row.compose_attempts ?? null, row.elapsed_ms ?? null,
         row.input_tokens ?? null, row.output_tokens ?? null,
         row.cache_read_tokens ?? null, row.cost_usd ?? null,
+        row.effort ?? null, row.effort_reason ?? null,
         row.error?.slice(0, 1000) ?? null,
       ],
     );

@@ -26,6 +26,7 @@ import {
 } from './claims';
 import { COMPOSE_INSTRUCTION, SYSTEM_PROMPT } from './prompt';
 import { agentTools, newRunContext, type RunContext, type ToolCallRecord } from './tools';
+import { classifyEffort, type Effort } from './effort';
 
 /**
  * Bounded deliberately. A question that keeps calling tools is either
@@ -46,8 +47,11 @@ export interface AskOptions {
   /** The timeline position. Passed to the model so answers respect the scrub. */
   asOf?: string;
   onProgress?: RunContext['onProgress'];
-  /** 'low' for lookups, 'high' for multi-hop attribution (Decision 5f). */
-  effort?: 'low' | 'medium' | 'high';
+  /**
+   * Omit to route by question shape (Decision 5f). Pass a level only to
+   * override the routing, which is what the A/B comparison does.
+   */
+  effort?: Effort;
 }
 
 export interface Usage {
@@ -70,6 +74,9 @@ export interface AskResult {
   usage: Usage;
   compose_attempts: number;
   elapsed_ms: number;
+  /** The level used, and why -- so routing can be measured rather than assumed. */
+  effort: Effort;
+  effort_reason: string;
   /** Set when no answer could be produced. */
   error?: string;
 }
@@ -124,7 +131,9 @@ function getClient(): Anthropic {
 export async function ask(opts: AskOptions): Promise<AskResult> {
   const started = Date.now();
   const model = opts.model ?? 'claude-sonnet-5';
-  const effort = opts.effort ?? 'high';
+  const routed = classifyEffort(opts.question);
+  const effort: Effort = opts.effort ?? routed.effort;
+  const effortReason = opts.effort ? 'set by caller' : routed.reason;
   const ctx = newRunContext(opts.onProgress);
   const usage = emptyUsage();
 
@@ -166,7 +175,7 @@ export async function ask(opts: AskOptions): Promise<AskResult> {
         return {
           question: opts.question, model, claims: null, validation: null,
           evidence: [...ctx.evidence], calls: ctx.calls, usage,
-          compose_attempts: 0, elapsed_ms: Date.now() - started,
+          compose_attempts: 0, elapsed_ms: Date.now() - started, effort, effort_reason: effortReason,
           error: 'The model declined to answer this question.',
         };
       }
@@ -182,7 +191,7 @@ export async function ask(opts: AskOptions): Promise<AskResult> {
     return {
       question: opts.question, model, claims: null, validation: null,
       evidence: [...ctx.evidence], calls: ctx.calls, usage,
-      compose_attempts: 0, elapsed_ms: Date.now() - started,
+      compose_attempts: 0, elapsed_ms: Date.now() - started, effort, effort_reason: effortReason,
       error: `Gathering failed: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
@@ -241,7 +250,7 @@ export async function ask(opts: AskOptions): Promise<AskResult> {
       return {
         question: opts.question, model, claims, validation,
         evidence: [...ctx.evidence], calls: ctx.calls, usage,
-        compose_attempts: attempts, elapsed_ms: Date.now() - started,
+        compose_attempts: attempts, elapsed_ms: Date.now() - started, effort, effort_reason: effortReason,
         error: `Composing failed: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
@@ -250,6 +259,6 @@ export async function ask(opts: AskOptions): Promise<AskResult> {
   return {
     question: opts.question, model, claims, validation,
     evidence: [...ctx.evidence], calls: ctx.calls, usage,
-    compose_attempts: attempts, elapsed_ms: Date.now() - started,
+    compose_attempts: attempts, elapsed_ms: Date.now() - started, effort, effort_reason: effortReason,
   };
 }

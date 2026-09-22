@@ -1815,6 +1815,73 @@ than returning an empty answer; and `eager_input_streaming` on client tools with
 validation on every parsed tool input, since the tolerant parser can return a silently
 truncated object.
 
+### 5f-amended. Model chosen by measurement, and effort routed by shape
+
+Decision 5f chose `claude-opus-5` on reasoning quality for multi-hop
+attribution. A $20 account cap made that a decision worth testing rather than
+assuming, so the same hard question — *"which fires are responsible for the
+smoke around Yosemite, and how confident should I be?"* — was run on both:
+
+| | Claims | Citations | Cost | Time |
+|---|---|---|---|---|
+| Sonnet 5 | 7 | 9 | **$0.14** | 71 s |
+| Opus 5 | 13 | 24 | **$0.37** | 80 s |
+
+Both refused to attribute, which is the correct answer. Sonnet's reasoning was
+sound: it checked wind at the fire and at the station separately and found the
+bearings do not connect.
+
+Opus was better on precisely the axis this product is graded on. It additionally
+caught that the 88.1 µg/m³ reading came from an `unknown`-tier station
+synthesized from the bulk feed, that the co-located reference monitor's reading
+was a day old and therefore not a check on it, that neither nearby cluster was
+industrial so the missing attribution was not explained that way, and it cited
+the 20.9% baseline to frame the refusal as normal rather than as a gap.
+
+**Development therefore ran on Sonnet and the model is an env var
+(`AGENT_MODEL`), decided at deploy.** Building on the cheaper model cost about
+a third as much per iteration while exercising exactly the same code path.
+
+#### Effort routing is a heuristic, deliberately
+
+Measured spread on one model: a lookup ran 18 s and $0.06, the attribution
+question 80 s and $0.37. Most questions are the cheap kind, so routing them
+down is most of the saving.
+
+**Chosen: a regex heuristic over the question text.** Rejected: a classifier
+call, which would add an API request and its latency to every question — on the
+path that exists to make questions cheaper — to decide something the wording
+usually gives away.
+
+**The bias is asymmetric on purpose.** Under-thinking a hard question produces
+a confident wrong answer, which is the failure this whole system exists to
+avoid; over-thinking an easy one costs a few cents. So nothing routes *down*
+unless it clearly looks like a lookup, anything ambiguous lands at `medium`,
+and causal, comparative, forecasting and multi-part questions go straight to
+`high`.
+
+Checked against 22 written-first cases, 22 correct. One earlier miss is worth
+keeping: *"what is the air quality in Portland for someone with asthma who
+cycles to work"* matched the lookup shape at 79 characters and routed **low**.
+It should not — the model has to recognise a health question it cannot answer,
+decline that part, and still answer the measurable part, which is more work
+than a lookup rather than less. Fixed with an advice-seeking signal and by
+tightening the length guard from 90 to 60, since every genuine lookup in the
+set is under 45.
+
+`ask_log` records the level and the reason with each question, so the claim
+that routing saves money is falsifiable rather than assumed.
+
+#### A limitation of citation validation, stated plainly
+
+Validation checks that a cited `record_id` was returned by a tool. It cannot
+check that the record *supports* the claim. In the Sonnet run, a claim about
+attribution finding no candidates cited an `aq_measurement` id — real, present,
+and only loosely related. Catching that would need semantic checking, which is
+a different and much weaker guarantee than the one being made here. What is
+guaranteed is that no citation is fabricated, which is the failure that would
+actually mislead a reader.
+
 ### 5g. Verification — golden question set
 
 A ~20-question set covering expected tool calls, expected groundedness, and expected
@@ -2152,7 +2219,8 @@ the first route or component is written.
 | 5h | Cell labelling | Containing zone only (23.8% named) | Nearest zone (wrong 223/358 in 3u) |
 | 5h | Conflict axes | Model-vs-measurement + sensor-vs-neighbours | Model-vs-measurement alone (cannot adjudicate) |
 | 5h | Uncomputed quality | `null` with `computed: false` | Empty array (reads as "none found") |
-| 5f | Model | `claude-opus-5`, effort routing | Sonnet 5 |
+| 5f | Model | Built on Sonnet 5; `AGENT_MODEL` decides at deploy | Assuming Opus without measuring (Opus won, 13 claims vs 7) |
+| 5f | Effort routing | Regex heuristic over question shape, biased upward | A classifier call (an API request to save API requests) |
 | 6a | Layout | Map-dominant, docked chat + timeline | Conversation-dominant |
 | 6b | Map stack | MapLibre GL | deck.gl |
 | 6c | Cold open | Seeded state + example questions | Empty state |

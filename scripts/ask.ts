@@ -37,12 +37,12 @@ async function main(): Promise<void> {
 
   const modelArg = (arg('model') ?? 'sonnet').toLowerCase();
   const model: AgentModel = modelArg.startsWith('o') ? 'claude-opus-5' : 'claude-sonnet-5';
-  const effort = (arg('effort') ?? 'high') as 'low' | 'medium' | 'high';
+  const effort = arg('effort') as 'low' | 'medium' | 'high' | undefined;
   const json = hasFlag('json');
 
   if (!json) {
     console.log(`\n  ${question}`);
-    console.log(`  ${model} · effort=${effort}\n`);
+    console.log(`  ${model}${effort ? ` · effort=${effort} (forced)` : ''}\n`);
   }
 
   const result = await ask({
@@ -80,7 +80,7 @@ async function main(): Promise<void> {
   if (!json) {
     const u = result.usage;
     console.log(
-      `\n  ${result.calls.length} tool call(s) · ${result.evidence.length} citable records · ` +
+      `\n  effort=${result.effort} (${result.effort_reason}) · ${result.calls.length} tool call(s) · ${result.evidence.length} citable records · ` +
       `${result.compose_attempts} compose attempt(s) · ${(result.elapsed_ms / 1000).toFixed(1)}s`);
     console.log(
       `  tokens: ${u.input_tokens} in (${u.cache_read_input_tokens} cached, ` +
