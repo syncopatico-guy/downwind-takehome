@@ -14,7 +14,7 @@
  *   - a citation opens the record it rests on, and the provider it came from
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import MapView from './MapView';
 import Timeline from './Timeline';
 import Chat from './Chat';
@@ -37,6 +37,36 @@ export default function DownwindApp() {
    * looked broken, and the main thing the product does was simply absent.
    */
   const [chatOpen, setChatOpen] = useState(false);
+  const chatPanel = useRef<HTMLElement>(null);
+  const openChatButton = useRef<HTMLButtonElement>(null);
+  const chatWasOpen = useRef(false);
+
+  /**
+   * Escape closes the overlay, and focus follows it in and back out again.
+   *
+   * Without the focus move, opening the panel left focus on the button now
+   * buried underneath it -- so a keyboard or screen-reader user opened
+   * something they were not taken to, and tabbed through the map behind it.
+   * Focus lands on the panel itself rather than its first control, because
+   * focusing the message input would summon the on-screen keyboard over a
+   * panel the user has only just opened.
+   */
+  useEffect(() => {
+    if (chatOpen) {
+      chatWasOpen.current = true;
+      chatPanel.current?.focus();
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') setChatOpen(false);
+      };
+      document.addEventListener('keydown', onKey);
+      return () => document.removeEventListener('keydown', onKey);
+    }
+    // Only steal focus back if we were the ones who moved it.
+    if (chatWasOpen.current) {
+      chatWasOpen.current = false;
+      openChatButton.current?.focus();
+    }
+  }, [chatOpen]);
 
   // The timeline is fetched once: 193 hourly frames is 58 KB, and refetching
   // it per scrub would be the network cost the whole design is avoiding.
@@ -129,23 +159,40 @@ export default function DownwindApp() {
           questions again and the answer appeared lost. `hidden` is display:
           none -- the component stays mounted and keeps its state.
         */}
+        {/*
+          The backdrop is now a pointer convenience ONLY, and is hidden from
+          assistive technology. It used to be the sole way out, labelled "Close
+          chat" -- but the panel is full-width below 420px, so measured at
+          375px exactly zero pixels of it were reachable. The real control now
+          lives inside the panel, and leaving this one in the accessibility
+          tree would mean two focusable elements with the same name for the
+          same action, one of them permanently buried.
+        */}
         {chatOpen && (
-          <button
-            aria-label="Close chat"
+          <div
+            aria-hidden="true"
             onClick={() => setChatOpen(false)}
             className="absolute inset-0 z-20 bg-slate-950/60 lg:hidden"
           />
         )}
         <aside
+          ref={chatPanel}
+          tabIndex={-1}
           className={
-            'border-l border-slate-800 ' +
+            'border-l border-slate-800 focus:outline-none ' +
             'lg:static lg:z-auto lg:block lg:w-[400px] lg:shrink-0 ' +
             (chatOpen
               ? 'absolute inset-y-0 right-0 z-30 w-full max-w-[420px]'
               : 'hidden')
           }
         >
-          <Chat at={at} pinnedToNow={pinnedToNow} onAnswer={onAnswer} onCite={setCited} />
+          <Chat
+            at={at}
+            pinnedToNow={pinnedToNow}
+            onAnswer={onAnswer}
+            onCite={setCited}
+            onClose={() => setChatOpen(false)}
+          />
         </aside>
 
         {/*
@@ -156,6 +203,7 @@ export default function DownwindApp() {
         */}
         {!chatOpen && (
           <button
+            ref={openChatButton}
             onClick={() => setChatOpen(true)}
             className="absolute bottom-4 right-4 z-20 inline-flex min-h-[44px] items-center rounded-full bg-sky-700 px-5 text-xs font-medium text-white shadow-lg hover:bg-sky-600 lg:hidden"
           >

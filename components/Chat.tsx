@@ -35,11 +35,18 @@ interface Props {
   pinnedToNow: boolean;
   onAnswer: (a: Answer) => void;
   onCite: (recordId: string) => void;
+  /**
+   * Dismisses the panel where it is an overlay. Only rendered below `lg`: at
+   * wider widths the panel is docked permanently and the button that opens it
+   * is itself `lg:hidden`, so a close control there would strand the user with
+   * no way back.
+   */
+  onClose?: () => void;
 }
 
 interface Progress { tool: string; detail?: string; done: boolean }
 
-export default function Chat({ at, pinnedToNow, onAnswer, onCite }: Props) {
+export default function Chat({ at, pinnedToNow, onAnswer, onCite, onClose }: Props) {
   const [question, setQuestion] = useState('');
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<Progress[]>([]);
@@ -119,12 +126,35 @@ export default function Chat({ at, pinnedToNow, onAnswer, onCite }: Props) {
 
   return (
     <div className="flex h-full flex-col bg-slate-950/95">
-      <div className="border-b border-slate-800 px-4 py-3">
-        <h1 className="text-sm font-semibold tracking-tight text-slate-100">Downwind</h1>
-        <p className="mt-0.5 text-[11px] leading-snug text-slate-500">
-          Where wildfire smoke is degrading air quality, which fires are responsible,
-          and where it is heading — from five live feeds.
-        </p>
+      <div className="flex items-start gap-2 border-b border-slate-800 px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <h1 className="text-sm font-semibold tracking-tight text-slate-100">Downwind</h1>
+          <p className="mt-0.5 text-[11px] leading-snug text-slate-500">
+            Where wildfire smoke is degrading air quality, which fires are responsible,
+            and where it is heading — from five live feeds.
+          </p>
+        </div>
+        {/*
+          As an overlay this panel is full-width on a phone, so it completely
+          covers the backdrop that used to be the only way out -- measured at
+          375px, zero pixels of it were reachable. A visible control is the
+          only thing that works at a width where the panel IS the screen.
+
+          `-mr-2 -mt-1` pulls the 44px hit area back into the padding so the
+          target is full size without the glyph drifting away from the corner.
+        */}
+        {onClose && (
+          <button
+            onClick={onClose}
+            aria-label="Close chat and return to the map"
+            className="-mr-2 -mt-1 inline-flex h-11 w-11 shrink-0 items-center justify-center rounded text-slate-500 hover:bg-slate-800 hover:text-slate-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 lg:hidden"
+          >
+            <svg viewBox="0 0 20 20" className="h-4 w-4" aria-hidden="true">
+              <path d="M5 5l10 10M15 5L5 15" stroke="currentColor" strokeWidth="1.8"
+                    strokeLinecap="round" fill="none" />
+            </svg>
+          </button>
+        )}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
