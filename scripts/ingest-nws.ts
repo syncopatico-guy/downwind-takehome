@@ -17,6 +17,7 @@ import { NWS_AREAS } from '../lib/scope';
 import { parseAlertFeature, fetchAlertsPaged, ensureZonesCached, NWS_BASE, type AlertRow }
   from '../lib/nws';
 import { withIngestRun, closePool, type TriggerKind, type IngestRunContext } from '../lib/db';
+import { describeFetchError } from '../lib/http';
 
 config({ path: '.env.local', quiet: true });
 config({ quiet: true });
@@ -147,15 +148,13 @@ async function main(): Promise<void> {
   for (const w of windows) {
     const t0 = Date.now();
     try {
-      const { features, pages, truncated } = await fetchAlertsPaged(w.url);
-      const parsed = features
-        .map((f) => parseAlertFeature(f))
-        .filter((a): a is AlertRow => a !== null);
-      const unparseable = features.length - parsed.length;
-      const zoneIds = parsed.flatMap((a) => a.ugcCodes);
-      const withGeom = parsed.filter((a) => a.geometry).length;
-
       if (dryRun) {
+        const { features, pages } = await fetchAlertsPaged(w.url);
+        const parsed = features
+          .map((f) => parseAlertFeature(f))
+          .filter((a): a is AlertRow => a !== null);
+        const zoneIds = parsed.flatMap((a) => a.ugcCodes);
+        const withGeom = parsed.filter((a) => a.geometry).length;
         console.log(
           `  ${w.label.padEnd(24)} features=${String(features.length).padStart(4)} ` +
             `parsed=${String(parsed.length).padStart(4)} pages=${pages} ` +
@@ -171,6 +170,18 @@ async function main(): Promise<void> {
           windowStart: w.start, windowEnd: w.end,
         },
         async (ctx) => {
+          // The fetch happens inside the run, so a network failure is recorded
+          // rather than vanishing -- see the FIRMS outage of 2026-09-22, where
+          // six endpoints failed and left no trace at all. Safe here because
+          // withIngestRun hands over the pool, not a checked-out client.
+          const { features, pages, truncated } = await fetchAlertsPaged(w.url);
+          const parsed = features
+            .map((f) => parseAlertFeature(f))
+            .filter((a): a is AlertRow => a !== null);
+          const unparseable = features.length - parsed.length;
+          const zoneIds = parsed.flatMap((a) => a.ugcCodes);
+          const withGeom = parsed.filter((a) => a.geometry).length;
+
           // Zones first: the alert geometry view unions cached zone polygons,
           // so resolving them before insert means an alert is never briefly
           // mapless after it lands.
@@ -181,7 +192,14 @@ async function main(): Promise<void> {
             count += await insertBatch(ctx, parsed.slice(i, i + BATCH_ROWS));
           }
           return {
-            value: { count, zones },
+            // The counts travel out with the value, because the summary line
+            // is printed outside the run and these no longer exist there.
+            value: {
+              count, zones,
+              featureCount: features.length,
+              parsedCount: parsed.length,
+              withGeom,
+            },
             outcome: {
               rowsFetched: features.length,
               rowsInserted: count,
@@ -202,17 +220,18 @@ async function main(): Promise<void> {
 
       totalNew += inserted.count;
       console.log(
-        `  ${w.label.padEnd(24)} features=${String(features.length).padStart(4)} ` +
+        `  ${w.label.padEnd(24)} features=${String(inserted.featureCount).padStart(4)} ` +
           `new=${String(inserted.count).padStart(4)} ` +
-          `dup=${String(parsed.length - inserted.count).padStart(4)} ` +
-          `poly=${String(withGeom).padStart(3)} zoned=${String(parsed.length - withGeom).padStart(3)} ` +
+          `dup=${String(inserted.parsedCount - inserted.count).padStart(4)} ` +
+          `poly=${String(inserted.withGeom).padStart(3)} ` +
+          `zoned=${String(inserted.parsedCount - inserted.withGeom).padStart(3)} ` +
           `zones(+${inserted.zones.fetched} cached=${inserted.zones.alreadyCached} ` +
           `nf=${inserted.zones.notFound} err=${inserted.zones.errored}) ` +
           `(${Date.now() - t0} ms)`,
       );
     } catch (err) {
       failures++;
-      console.error(`  ${w.label.padEnd(24)} FAILED: ${err instanceof Error ? err.message : err}`);
+      console.error(`  ${w.label.padEnd(24)} FAILED: ${describeFetchError(err)}`);
     }
   }
 

@@ -1360,6 +1360,111 @@ we do not hold, so it could not be ruled out.
 target Node 20, which is deprecated; the runner forces them onto Node 24. Not
 breaking, not yet worth a commit.
 
+### 4m. The failure that left no trace
+
+The FIRMS run that failed at 09:21 UTC on 2026-09-22 was transient -- all six
+VIIRS endpoints returned HTTP 200 within minutes of being checked, in 166-610
+ms. The interesting part was not why it failed but what it did not leave behind.
+
+**Measured: `ingest_runs` held zero rows for FIRMS between 09:00 and 10:00.**
+The feed reported `stale`, and the database could not say why. A failed attempt
+was indistinguishable from no attempt.
+
+That is exactly the distinction the provenance log exists to make, and it
+undercuts the argument in Decision 4b for tolerating GitHub cron drift:
+*"`ingest_runs` logs every attempt with its intended window -- so a missed run
+makes the resulting gap provable rather than silent."* It also contradicted
+`lib/db.ts`, which promises that a crashed ingester leaves an explanatory
+record rather than a silent hole.
+
+**Cause: every cron path fetched before opening its run.**
+
+| Path | fetch | `withIngestRun` |
+|---|---|---|
+| `ingest-firms.ts` | :132 | :165 |
+| `ingest-nws.ts` (alerts) | :150 | :168 |
+| `ingest-openaq.ts` (latest) | :244 | :275 |
+| `ingest-openaq.ts` (stations) | :106 | :126 |
+| `ingest-openmeteo.ts` | :190 | :207 |
+
+So this was never a FIRMS quirk: a network failure in **any** feed was
+invisible. Two maintenance paths -- the NWS zone re-resolution and the OpenAQ
+backfill -- already opened the run first, so the correct pattern was in the
+codebase; the cron paths simply did not follow it.
+
+There is a particular irony in the FIRMS case. The comment immediately above
+the run opener read *"Recording the intent is what later lets a query prove a
+gap rather than merely suspect one"* -- and the intent was the one thing never
+recorded.
+
+#### Three fixes, and the decisions behind them
+
+**Open the run before the fetch, in all five cron paths.** Rejected: fixing
+FIRMS alone, or FIRMS and NWS. A provenance guarantee that holds for one feed
+of five is not a guarantee, and it is the claim this document is argued on.
+The restructure is safe by construction: `withIngestRun` deliberately hands
+over the pool rather than a checked-out client (Decision 4d), precisely so long
+HTTP work can happen inside the callback without idling a connection to death.
+
+**A shared `lib/http.ts` for FIRMS and NWS only.** Both had no retry at all,
+only a timeout. `lib/openaq.ts` and `lib/openmeteo.ts` already retry, and
+OpenAQ's sliding-window limiter took three attempts to get right; replacing
+working rate-limit code on day 2 of 3 would trade a real risk for a tidier
+dependency graph. **Accepted cost:** two retry implementations coexist, and the
+older one still retries 4xx.
+
+NWS matters most here, incidentally: it is the one feed that cannot be
+backfilled, because the provider retains only 7-14 days (Decision 3j). A
+transient failure there costs history permanently.
+
+**Fail fast on 4xx except 429.** Retry network faults, timeouts, 429 and 5xx;
+treat 400/401/403/404 as terminal, because they are statements about the
+request and will say the same thing next time. Measured: a real 404 now fails
+in 766 ms on one attempt, where retry-everything would have spent ~3.8 s across
+four. The `/alerts/active` rejecting `limit` bug (Decision 4h) is exactly this
+shape.
+
+**Exit codes unchanged: FIRMS goes red only when all six endpoints fail.**
+Partial failure is now fully visible in `ingest_runs` and
+`v_feed_variant_health`, which is where it belongs, and the pessimistic rollup
+already surfaces one dead endpoint as a stale source. A workflow badge that is
+often red is a badge people stop reading.
+
+#### A half-fix caught by verifying rather than assuming
+
+The first version logged the cause chain to the console and was declared done.
+Testing the database write showed `ingest_runs.error_message` still read
+`fetch failed`, because `withIngestRun` recorded `err.message`. The console is
+not what `get_data_health` reads.
+
+Fixed at the source: `withIngestRun` now records `describeFetchError(err)`, so
+**every feed benefits, including the two whose call sites were not otherwise
+touched.** It also surfaces the SQLSTATE on database errors, which the plain
+message omits.
+
+#### Verified
+
+| Check | Result |
+|---|---|
+| Unresolvable host | `fetch failed <- ENOTFOUND: getaddrinfo ENOTFOUND ...`, 3 attempts, 2,948 ms |
+| Real 404 | terminal, 1 attempt, 766 ms |
+| Real 200 | attempt 1, 330 ms |
+| 1 ms deadline | classified `TimeoutError`, not a generic abort |
+| Classification | 7 of 7 cases correct |
+| **Failure recorded** | run row written with `status=error`, `request_url`, intended window, and the full cause chain |
+
+All five cron commands were then run exactly as their workflows invoke them --
+not approximations, per Decision 4h. FIRMS inserted 1,140 detections, NWS 2
+alerts, OpenAQ 588 + 89 measurements and 2,799 roster rows, Open-Meteo 17,925
+weather rows, CAMS 0 new from 70,464 fetched (the 12-hour model cycle and the
+value-hash dedupe both behaving correctly). All five sources returned to
+`fresh`.
+
+**One gap left open, noted rather than fixed:** OpenAQ and Open-Meteo runs
+record no `request_url`, because each run spans many batched URLs. Their
+provenance is therefore one step shallower than FIRMS and NWS, which name the
+exact endpoint.
+
 ## Decision 5 — The agent
 
 ### Governing principle: the model never performs arithmetic
@@ -1804,6 +1909,10 @@ the first route or component is written.
 | 4e | Storage headroom | 267/500 MB; narrow the seed first if pressed | Cut a graded deliverable |
 | 4f | Cron + repo visibility | Public repo, per-feed Actions cadences | Private with 2h polling (~1,260 min/month) |
 | 4l | Cron phase | Offset off :00/:15/:30/:45; cadence unchanged | Wait for GitHub's scheduler to start on its own |
+| 4m | Run ordering | Open the ingest run BEFORE the fetch, all five cron paths | Fix FIRMS only (leaves four feeds hiding failures) |
+| 4m | Retry reuse | New `lib/http.ts` for FIRMS and NWS; leave OpenAQ/Open-Meteo | One implementation everywhere (refactors working limiter) |
+| 4m | Retry policy | Fail fast on 4xx except 429 | Retry everything (4 attempts on an HTTP 400) |
+| 4m | Error text | Record `describeFetchError` in `ingest_runs` | `err.message` (undici gives only "fetch failed") |
 | 4g | Freshness population | Measure over cron runs only; one-offs excluded | Count every run (produced false staleness) |
 | 4d | DB drivers | `pg` for scripts, `@neondatabase/serverless` for routes | One driver everywhere |
 | 4b | Ingestion trigger | GitHub Actions cron | Vercel Cron (daily-only on Hobby) |

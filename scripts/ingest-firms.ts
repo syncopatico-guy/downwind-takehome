@@ -24,6 +24,7 @@ import { config } from 'dotenv';
 import { firmsFeedVariants, type FirmsWindow } from '../lib/scope';
 import { parseFirmsCsv, type FirmsDetection } from '../lib/firms';
 import { withIngestRun, closePool, type TriggerKind, type IngestRunContext } from '../lib/db';
+import { fetchWithRetry, describeFetchError } from '../lib/http';
 
 config({ path: '.env.local', quiet: true });
 config({ quiet: true });
@@ -31,6 +32,11 @@ config({ quiet: true });
 const SOURCE_ID = 'firms_viirs';
 const BATCH_ROWS = 500;          // 500 x 15 params = 7,500, well under Postgres' 65,535
 const FETCH_TIMEOUT_MS = 60_000;
+// All six endpoints share one hostname, so a single unreachable host fails
+// every one of them at once -- which is exactly what happened on 2026-09-22,
+// six failures inside 1.5 seconds. Retries turn a blip into a slow run rather
+// than a lost half-hour of coverage.
+const FETCH_ATTEMPTS = 3;
 
 function arg(name: string): string | undefined {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -81,21 +87,13 @@ async function insertBatch(
 }
 
 async function fetchCsv(url: string): Promise<{ body: string; status: number }> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      headers: { 'User-Agent': process.env.NWS_USER_AGENT ?? '(downwind)' },
-    });
-    const body = await res.text();
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status} from ${url}: ${body.slice(0, 200)}`);
-    }
-    return { body, status: res.status };
-  } finally {
-    clearTimeout(timer);
-  }
+  const { body, status } = await fetchWithRetry(url, {
+    timeoutMs: FETCH_TIMEOUT_MS,
+    attempts: FETCH_ATTEMPTS,
+    label: 'firms',
+    headers: { 'User-Agent': process.env.NWS_USER_AGENT ?? '(downwind)' },
+  });
+  return { body, status };
 }
 
 async function main(): Promise<void> {
@@ -128,30 +126,27 @@ async function main(): Promise<void> {
 
   for (const v of variants) {
     const started = Date.now();
+
+    // The event-time window this run INTENDED to cover. Computed BEFORE the
+    // fetch, deliberately: recording the intent is what later lets a query
+    // prove a gap rather than merely suspect one, and a run that dies in the
+    // fetch is precisely the case that needs proving.
+    const days = window === '7d' ? 7 : window === '48h' ? 2 : 1;
+    const windowEnd = new Date();
+    const windowStart = new Date(windowEnd.getTime() - days * 86_400_000);
+
     try {
-      const { body, status } = await fetchCsv(v.url);
-      const parsed = parseFirmsCsv(body, {
-        satellite: v.platform,
-        instrument: v.instrument,
-      });
-
-      // Scope filtering happens here, not in the parser: the parser's job is a
-      // faithful read of what the feed published, and the anomaly/reject counts
-      // stay meaningful over the whole payload rather than a subset.
-      const toStore = scopeFilter
-        ? parsed.detections.filter((d) => d.inScope)
-        : parsed.detections;
-
-      totalParsed += parsed.detections.length;
-      totalInScope += parsed.inScopeCount;
-
-      // The event-time window this run INTENDED to cover. Recording the intent
-      // is what later lets a query prove a gap rather than merely suspect one.
-      const days = window === '7d' ? 7 : window === '48h' ? 2 : 1;
-      const windowEnd = new Date();
-      const windowStart = new Date(windowEnd.getTime() - days * 86_400_000);
-
       if (dryRun) {
+        const { body } = await fetchCsv(v.url);
+        const parsed = parseFirmsCsv(body, {
+          satellite: v.platform,
+          instrument: v.instrument,
+        });
+        const toStore = scopeFilter
+          ? parsed.detections.filter((d) => d.inScope)
+          : parsed.detections;
+        totalParsed += parsed.detections.length;
+        totalInScope += parsed.inScopeCount;
         console.log(
           `  ${v.feedVariant.padEnd(22)} parsed=${String(parsed.detections.length).padStart(6)} ` +
             `to-store=${String(toStore.length).padStart(6)} ` +
@@ -162,7 +157,7 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const inserted = await withIngestRun(
+      const result = await withIngestRun(
         {
           sourceId: SOURCE_ID,
           feedVariant: v.feedVariant,
@@ -172,12 +167,41 @@ async function main(): Promise<void> {
           windowEnd,
         },
         async (ctx) => {
+          // The fetch happens INSIDE the run, not before it.
+          //
+          // It used to run first, and on 2026-09-22 all six endpoints failed
+          // at the network level -- leaving ZERO rows in ingest_runs. The feed
+          // went stale and the database could not say why, because a failed
+          // attempt was indistinguishable from no attempt. That is the exact
+          // distinction the provenance log exists to make (Decision 4b).
+          //
+          // This is safe by construction: withIngestRun hands over the pool
+          // rather than a checked-out client, precisely so that long HTTP work
+          // can happen in here without idling a connection to death.
+          const { body, status } = await fetchCsv(v.url);
+          const parsed = parseFirmsCsv(body, {
+            satellite: v.platform,
+            instrument: v.instrument,
+          });
+
+          // Scope filtering happens here, not in the parser: the parser's job
+          // is a faithful read of what the feed published, and the
+          // anomaly/reject counts stay meaningful over the whole payload
+          // rather than a subset.
+          const toStore = scopeFilter
+            ? parsed.detections.filter((d) => d.inScope)
+            : parsed.detections;
+
+          totalParsed += parsed.detections.length;
+          totalInScope += parsed.inScopeCount;
+
           let count = 0;
           for (let i = 0; i < toStore.length; i += BATCH_ROWS) {
             count += await insertBatch(ctx, toStore.slice(i, i + BATCH_ROWS));
           }
+
           return {
-            value: count,
+            value: { count, parsed, stored: toStore.length },
             outcome: {
               rowsFetched: parsed.rowsFetched,
               rowsInserted: count,
@@ -203,20 +227,22 @@ async function main(): Promise<void> {
         },
       );
 
-      totalInserted += inserted;
+      totalInserted += result.count;
       console.log(
-        `  ${v.feedVariant.padEnd(22)} fetched=${String(parsed.rowsFetched).padStart(6)} ` +
-          `new=${String(inserted).padStart(6)} ` +
-          `dup=${String(toStore.length - inserted).padStart(6)} ` +
-          `dropped=${String(parsed.detections.length - toStore.length).padStart(6)} ` +
-          `rejected=${parsed.rowsRejected} (${Date.now() - started} ms)`,
+        `  ${v.feedVariant.padEnd(22)} fetched=${String(result.parsed.rowsFetched).padStart(6)} ` +
+          `new=${String(result.count).padStart(6)} ` +
+          `dup=${String(result.stored - result.count).padStart(6)} ` +
+          `dropped=${String(result.parsed.detections.length - result.stored).padStart(6)} ` +
+          `rejected=${result.parsed.rowsRejected} (${Date.now() - started} ms)`,
       );
     } catch (err) {
       failures++;
-      // One endpoint failing must not abort the others -- partial data with an
-      // recorded failure beats no data with no explanation.
+      // One endpoint failing must not abort the others -- partial data with a
+      // recorded failure beats no data with no explanation. describeFetchError
+      // walks the cause chain, because undici reports every network fault as
+      // the single unactionable word "fetch failed".
       console.error(
-        `  ${v.feedVariant.padEnd(22)} FAILED: ${err instanceof Error ? err.message : err}`,
+        `  ${v.feedVariant.padEnd(22)} FAILED: ${describeFetchError(err)}`,
       );
     }
   }

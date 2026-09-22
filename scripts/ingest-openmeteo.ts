@@ -186,24 +186,31 @@ async function runFeed(
   if (points.length === 0) { console.log('    no active points — skipping'); return; }
 
   const t0 = Date.now();
-  const series = which === 'weather'
-    ? await fetchWeather(points, pastDays, forecastDays,
-        (d, t) => console.log(`    fetched ${d}/${t} points`))
-    : await fetchCams(points, pastDays, forecastDays,
-        (d, t) => console.log(`    fetched ${d}/${t} points`));
 
-  const now = Date.now();
-  const vars = which === 'weather' ? WEATHER_VARS : CAMS_VARS;
-  const rows = toRows(series, vars, now);
-  const forecastRows = rows.filter((r) => r.isForecast).length;
+  // Fetch and shaping together, so the run can own both. Open-Meteo already
+  // retries internally; what it lacked was a record when every attempt failed.
+  const collect = async () => {
+    const series = which === 'weather'
+      ? await fetchWeather(points, pastDays, forecastDays,
+          (d, t) => console.log(`    fetched ${d}/${t} points`))
+      : await fetchCams(points, pastDays, forecastDays,
+          (d, t) => console.log(`    fetched ${d}/${t} points`));
+    const vars = which === 'weather' ? WEATHER_VARS : CAMS_VARS;
+    const rows = toRows(series, vars, Date.now());
+    return { rows, forecastRows: rows.filter((r) => r.isForecast).length };
+  };
 
   if (dryRun) {
+    const { rows, forecastRows } = await collect();
     console.log(`    would insert ${rows.length} rows ` +
                 `(${rows.length - forecastRows} analysis, ${forecastRows} forecast) ` +
                 `(${Date.now() - t0} ms)`);
     return;
   }
 
+  // The window is the run's INTENT, so it is computed before the fetch and
+  // recorded even when the fetch is what fails.
+  const now = Date.now();
   const inserted = await withIngestRun(
     {
       sourceId, triggerKind,
@@ -211,11 +218,12 @@ async function runFeed(
       windowEnd: new Date(now + forecastDays * 86_400_000),
     },
     async (ctx) => {
+      const { rows, forecastRows } = await collect();
       const n = which === 'weather'
         ? await insertWeather(ctx, rows)
         : await insertCams(ctx, rows);
       return {
-        value: n,
+        value: { n, rowCount: rows.length, forecastRows },
         outcome: {
           rowsFetched: rows.length, rowsInserted: n, rowsRejected: 0,
           notes: {
@@ -229,8 +237,9 @@ async function runFeed(
     },
   );
 
-  console.log(`    rows=${rows.length} new=${inserted} dup=${rows.length - inserted} ` +
-              `forecast=${forecastRows} (${Date.now() - t0} ms)`);
+  console.log(`    rows=${inserted.rowCount} new=${inserted.n} ` +
+              `dup=${inserted.rowCount - inserted.n} ` +
+              `forecast=${inserted.forecastRows} (${Date.now() - t0} ms)`);
 }
 
 async function main(): Promise<void> {

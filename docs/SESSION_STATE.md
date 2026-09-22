@@ -169,6 +169,16 @@ Most accept `--dry-run` and `--budget=<minutes>`. Migrations are numbered
    `past_days=1` does **not** avoid that.
 9. OpenAQ is 60 req/min. The sliding-window limiter in `lib/openaq.ts` handles
    it; do not reintroduce flat sleeps.
+10. **Open the ingest run BEFORE the fetch.** Every cron path used to fetch
+    first, so a network failure left no row in `ingest_runs` at all and the
+    feed went stale with no explanation. Fixed in all five paths on
+    2026-09-22. `withIngestRun` passes the pool, not a held client, precisely
+    so HTTP work inside the callback is safe.
+11. **`fetch failed` is undici hiding the reason in `err.cause`.** Use
+    `describeFetchError` from `lib/http.ts`, which walks the chain.
+    `withIngestRun` already does this for `error_message`.
+12. FIRMS and NWS retry via `lib/http.ts` (3 attempts, fail fast on 4xx except
+    429). OpenAQ and Open-Meteo keep their own older loops, which retry 4xx.
 
 ---
 

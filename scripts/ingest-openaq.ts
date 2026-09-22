@@ -101,31 +101,44 @@ async function ingestStations(
   // Draining the queue is resumable and chunkable, but re-fetching and
   // re-upserting 2,799 roster rows on every chunk is pure waste -- the roster
   // changes daily, the queue drains in batches.
-  const { stations, pages, truncated } = skipRoster
-    ? { stations: [] as OpenAqStation[], pages: 0, truncated: false }
-    : await fetchStationsInBbox();
-  const fixed = stations.filter((s) => s.isMobile !== true);
-  const withPm = fixed.filter((s) =>
-    s.sensors.some((sn) => (AQ_PARAMETERS as readonly string[]).includes(sn.parameter)));
-  const live24 = withPm.filter(
-    (s) => s.datetimeLast && Date.now() - s.datetimeLast.getTime() < 86_400_000);
-  const tiers = withPm.reduce<Record<string, number>>((acc, s) => {
-    const t = tierOf(s.isMonitor); acc[t] = (acc[t] ?? 0) + 1; return acc;
-  }, {});
+  const summarise = (stations: OpenAqStation[], pages: number, truncated: boolean) => {
+    const fixed = stations.filter((s) => s.isMobile !== true);
+    const withPm = fixed.filter((s) =>
+      s.sensors.some((sn) => (AQ_PARAMETERS as readonly string[]).includes(sn.parameter)));
+    const live24 = withPm.filter(
+      (s) => s.datetimeLast && Date.now() - s.datetimeLast.getTime() < 86_400_000);
+    const tiers = withPm.reduce<Record<string, number>>((acc, s) => {
+      const t = tierOf(s.isMonitor); acc[t] = (acc[t] ?? 0) + 1; return acc;
+    }, {});
 
-  if (skipRoster) {
-    console.log('  roster refresh SKIPPED (--skip-roster): draining queue only');
-  } else {
-    console.log(`  discovered=${stations.length} pages=${pages}${truncated ? ' (TRUNCATED)' : ''}`);
-    console.log(`  fixed=${fixed.length} with_pm=${withPm.length} live_24h=${live24.length}`);
-    console.log(`  tiers=${JSON.stringify(tiers)}`);
+    if (skipRoster) {
+      console.log('  roster refresh SKIPPED (--skip-roster): draining queue only');
+    } else {
+      console.log(`  discovered=${stations.length} pages=${pages}${truncated ? ' (TRUNCATED)' : ''}`);
+      console.log(`  fixed=${fixed.length} with_pm=${withPm.length} live_24h=${live24.length}`);
+      console.log(`  tiers=${JSON.stringify(tiers)}`);
+    }
+    return { withPm, fixed, live24, tiers };
+  };
+
+  if (dryRun) {
+    const { stations, pages, truncated } = skipRoster
+      ? { stations: [] as OpenAqStation[], pages: 0, truncated: false }
+      : await fetchStationsInBbox();
+    summarise(stations, pages, truncated);
+    return;
   }
-
-  if (dryRun) return;
 
   await withIngestRun(
     { sourceId: SOURCE_ID, feedVariant: 'stations', triggerKind },
     async (ctx) => {
+      // Fetch inside the run: a roster refresh that dies at the network leaves
+      // an explanatory row rather than nothing at all.
+      const { stations, pages, truncated } = skipRoster
+        ? { stations: [] as OpenAqStation[], pages: 0, truncated: false }
+        : await fetchStationsInBbox();
+      const { withPm, fixed, live24, tiers } = summarise(stations, pages, truncated);
+
       let upserted = 0;
       let sensorRows = 0;
 
@@ -241,30 +254,37 @@ async function ingestLatest(triggerKind: TriggerKind, dryRun: boolean): Promise<
   for (const param of AQ_PARAMETERS) {
     const paramId = PARAM_IDS[param];
     const t0 = Date.now();
-    const { readings, pages, truncated } = await fetchLatestForParameter(paramId, since);
-    const mine = readings.filter((r) => wanted.has(r.sensorId));
-    // The bulk feed returns more rows than it has distinct sensors (overlapping
-    // pages), so surface both counts -- otherwise "matched 926, inserted 649"
-    // looks like data loss when it is the dedupe working correctly.
-    const distinctSensors = new Set(mine.map((r) => r.sensorId)).size;
-    const inBox = readings.filter((r) => inScope(r.lat, r.lon)).length;
+    // Fetch and derivation together, so the run can own both. Called inside
+    // withIngestRun on the real path, so a network failure is recorded rather
+    // than leaving the feed silently stale.
+    const collect = async () => {
+      const { readings, pages, truncated } = await fetchLatestForParameter(paramId, since);
+      const mine = readings.filter((r) => wanted.has(r.sensorId));
+      // The bulk feed returns more rows than it has distinct sensors (overlapping
+      // pages), so surface both counts -- otherwise "matched 926, inserted 649"
+      // looks like data loss when it is the dedupe working correctly.
+      const distinctSensors = new Set(mine.map((r) => r.sensorId)).size;
+      const inBox = readings.filter((r) => inScope(r.lat, r.lon)).length;
 
-    // Cheap side of gap discovery: note in-bbox locations we have no roster
-    // entry for. Resolving them costs a request each, so that is deferred to
-    // `stations` mode rather than done here on the hourly path.
-    const unknownHere = new Map<number, {
-      lat: number; lon: number; sensorId: number; eventTime: Date;
-    }>();
-    for (const r of readings) {
-      if (!inScope(r.lat, r.lon)) continue;
-      if (!knownLocations.has(r.locationId)) {
-        unknownHere.set(r.locationId, {
-          lat: r.lat, lon: r.lon, sensorId: r.sensorId, eventTime: r.eventTime,
-        });
+      // Cheap side of gap discovery: note in-bbox locations we have no roster
+      // entry for. Resolving them costs a request each, so that is deferred to
+      // `stations` mode rather than done here on the hourly path.
+      const unknownHere = new Map<number, {
+        lat: number; lon: number; sensorId: number; eventTime: Date;
+      }>();
+      for (const r of readings) {
+        if (!inScope(r.lat, r.lon)) continue;
+        if (!knownLocations.has(r.locationId)) {
+          unknownHere.set(r.locationId, {
+            lat: r.lat, lon: r.lon, sensorId: r.sensorId, eventTime: r.eventTime,
+          });
+        }
       }
-    }
+      return { readings, pages, truncated, mine, distinctSensors, inBox, unknownHere };
+    };
 
     if (dryRun) {
+      const { readings, pages, truncated, mine, inBox, unknownHere } = await collect();
       console.log(
         `  ${param}: global=${readings.length} pages=${pages} in_bbox=${inBox} ` +
         `selected=${mine.length} unknown=${unknownHere.size}` +
@@ -278,6 +298,9 @@ async function ingestLatest(triggerKind: TriggerKind, dryRun: boolean): Promise<
         windowStart: since, windowEnd: new Date(),
       },
       async (ctx) => {
+        const {
+          readings, pages, truncated, mine, distinctSensors, inBox, unknownHere,
+        } = await collect();
         // Synthesize a minimal station for every in-bbox location we have no
         // metadata for. Coordinates come from the reading itself, so this
         // costs no extra requests. Tier stays 'unknown' -- these are probably
@@ -338,7 +361,13 @@ async function ingestLatest(triggerKind: TriggerKind, dryRun: boolean): Promise<
           count += res.rowCount ?? 0;
         }
         return {
-          value: count,
+          // Counts travel out with the value: the summary line prints outside
+          // the run, where these no longer exist.
+          value: {
+            count,
+            globalCount: readings.length, inBox, matched: mine.length,
+            distinctSensors, synthesizedCount: unknownHere.size,
+          },
           outcome: {
             rowsFetched: readings.length, rowsInserted: count, rowsRejected: 0,
             notes: {
@@ -353,9 +382,12 @@ async function ingestLatest(triggerKind: TriggerKind, dryRun: boolean): Promise<
       },
     );
     console.log(
-      `  ${param}: global=${readings.length} in_bbox=${inBox} matched=${mine.length} ` +
-      `(${distinctSensors} distinct sensors, ${mine.length - distinctSensors} feed repeats) ` +
-      `new=${inserted} synthesized=${unknownHere.size} (${Date.now() - t0} ms)`);
+      `  ${param}: global=${inserted.globalCount} in_bbox=${inserted.inBox} ` +
+      `matched=${inserted.matched} ` +
+      `(${inserted.distinctSensors} distinct sensors, ` +
+      `${inserted.matched - inserted.distinctSensors} feed repeats) ` +
+      `new=${inserted.count} synthesized=${inserted.synthesizedCount} ` +
+      `(${Date.now() - t0} ms)`);
   }
 }
 

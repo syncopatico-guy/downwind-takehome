@@ -12,6 +12,7 @@
  */
 
 import type { Queryable } from './db';
+import { fetchWithRetry } from './http';
 
 const NWS_BASE = 'https://api.weather.gov';
 
@@ -105,20 +106,26 @@ export function parseAlertFeature(feature: Record<string, unknown>): AlertRow | 
   };
 }
 
+/**
+ * NWS had no retry at all, only a timeout. It is also the one feed that cannot
+ * be backfilled -- the provider retains roughly 7-14 days and then the data is
+ * gone upstream (Decision 3j) -- so a transient failure here costs history
+ * permanently, unlike FIRMS or Open-Meteo where a later run can re-fetch the
+ * same window.
+ *
+ * Retries cover network faults, timeouts, 429 and 5xx. A 4xx is terminal: the
+ * `/alerts/active` rejecting `limit` bug (Decision 4h) is exactly the shape of
+ * error that never succeeds on a second attempt, and retrying it would only
+ * delay the diagnosis behind three backoffs.
+ */
 async function getJson(url: string, timeoutMs = 45_000): Promise<Record<string, unknown>> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      headers: { 'User-Agent': userAgent(), Accept: 'application/geo+json' },
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}: ${text.slice(0, 200)}`);
-    return JSON.parse(text) as Record<string, unknown>;
-  } finally {
-    clearTimeout(timer);
-  }
+  const { body } = await fetchWithRetry(url, {
+    timeoutMs,
+    attempts: 3,
+    label: 'nws',
+    headers: { 'User-Agent': userAgent(), Accept: 'application/geo+json' },
+  });
+  return JSON.parse(body) as Record<string, unknown>;
 }
 
 /**

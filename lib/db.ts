@@ -8,6 +8,7 @@
  */
 
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
+import { describeFetchError } from './http';
 
 /** Anything that can run a query: the pool itself, or a checked-out client. */
 export type Queryable = Pick<Pool, 'query'> | Pick<PoolClient, 'query'>;
@@ -218,7 +219,13 @@ export async function withIngestRun<T>(
     );
     return value;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    // describeFetchError rather than err.message, because undici reports every
+    // network fault as the single word "fetch failed" and drops the reason into
+    // `cause`. Writing the bare message left the provenance log unable to say
+    // whether a feed died of DNS, a refused connection or a certificate -- and
+    // the provenance log is what get_data_health reads. It also surfaces the
+    // SQLSTATE on database errors, which the plain message omits.
+    const message = describeFetchError(err);
     try {
       await pool.query(
         `UPDATE ingest_runs
