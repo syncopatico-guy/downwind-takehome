@@ -16,7 +16,8 @@
     "cluster:fires": "tsx scripts/cluster-fires.ts",
     "attribute:smoke": "tsx scripts/attribute-smoke.ts",
     "build:frames": "tsx scripts/build-frames.ts",
-    "verify:tools": "tsx scripts/verify-tools.ts"
+    "verify:tools": "tsx scripts/verify-tools.ts",
+    "ask": "tsx scripts/ask.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.127.0",
