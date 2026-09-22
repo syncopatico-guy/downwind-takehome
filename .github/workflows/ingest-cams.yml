@@ -1,0 +1,40 @@
+name: Ingest CAMS model air quality
+
+on:
+  schedule:
+    # Every 6 hours, offset from the hourly job at :05 so they do not contend
+    # for Open-Meteo's rate limit simultaneously.
+    #
+    # Cadence is set by the MODEL, not by us: CAMS publishes on a ~12h cycle.
+    # Measured, an hourly run 30 minutes after a full pull returned 0 new rows
+    # from 96,912 fetched -- the value-hash dedupe correctly rejecting every
+    # one. Polling twice per cycle picks up an update within 6 hours without
+    # spending ~200 requests a day to discard identical data.
+    - cron: '15 */6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ingest-cams
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run ingester
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENAQ_API_KEY: ${{ secrets.OPENAQ_API_KEY }}
+          NWS_USER_AGENT: ${{ secrets.NWS_USER_AGENT }}
+        run: |
+          npm run ingest:openmeteo -- --mode=cams --trigger=cron --past-days=1 --forecast-days=2

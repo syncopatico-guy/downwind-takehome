@@ -17,7 +17,7 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +34,10 @@ jobs:
           OPENAQ_API_KEY: ${{ secrets.OPENAQ_API_KEY }}
           NWS_USER_AGENT: ${{ secrets.NWS_USER_AGENT }}
         run: |
+          # CAMS is NOT here: it updates on a ~12h cycle, so 11 of every 12
+          # hourly runs fetched ~97,000 rows the dedupe then discarded. It has
+          # its own 6-hourly workflow.
+          #
           # past_days=1 keeps the hourly run cheap in rows and bandwidth --
           # deeper history is a one-off backfill, not something a cron repeats.
           # Note it does NOT avoid rate limiting: measured, a 429 still lands
@@ -41,4 +45,3 @@ jobs:
           # per request (or requests per minute), not the span requested.
           npm run ingest:openaq -- --mode=latest --trigger=cron --budget=10
           npm run ingest:openmeteo -- --mode=weather --trigger=cron --past-days=1 --forecast-days=2
-          npm run ingest:openmeteo -- --mode=cams --trigger=cron --past-days=1 --forecast-days=2

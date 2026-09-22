@@ -933,8 +933,19 @@ back to server queries and nothing else breaks.
 ### 4f. Ingestion scheduling — and why the repository is public
 
 **Chosen: GitHub Actions with per-feed cadences** — NWS every 15 min, FIRMS
-every 30 min, OpenAQ `latest` plus both Open-Meteo feeds hourly, OpenAQ roster
-refresh daily.
+every 30 min, OpenAQ `latest` plus Open-Meteo wind hourly, **CAMS every 6
+hours**, OpenAQ roster refresh daily. 173 scheduled runs/day across five
+workflows.
+
+**CAMS is 6-hourly because the model sets the cadence, not us.** Measured: an
+hourly run 30 minutes after a full pull returned **0 new rows from 96,912
+fetched** — the value-hash dedupe correctly rejecting every one, because CAMS
+publishes on a ~12h cycle. Polling twice per cycle picks up an update within
+six hours instead of spending ~200 requests a day and ~30 minutes of
+rate-limit waiting to discard identical data. It also cut the hourly job from
+~4 minutes to ~2. Wind stays hourly for the opposite reason: the same 30-minute
+gap produced **36,240 revised rows**, because forecast values genuinely change
+— which is the bitemporal design doing exactly what it was built for.
 
 **The repository was made public to make this possible.** Actions minutes are
 unlimited for public repositories but capped at 2,000/month for private ones,

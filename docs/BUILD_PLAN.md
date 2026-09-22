@@ -17,7 +17,7 @@ interactive replay timeline, deployed publicly.
 | 3 | NWS alerts ingester + zone geometry | **done** |
 | 4 | OpenAQ stations and measurements | **done** |
 | 5 | Open-Meteo wind + CAMS model AQ | **done** |
-| 6 | GitHub Actions cron | **workflows written; awaiting public repo + secrets** |
+| 6 | GitHub Actions cron | **done** — 5 workflows, 173 runs/day, all paths tested |
 | 7 | Fire clustering | next |
 | 8 | Smoke attribution | |
 | 9 | `hourly_frames` rollup | |
