@@ -11,6 +11,23 @@ on:
     # from 96,912 fetched -- the value-hash dedupe correctly rejecting every
     # one. Polling twice per cycle picks up an update within 6 hours without
     # spending ~200 requests a day to discard identical data.
+    #
+    # REVISED 2026-09-22, 4x/day -> 2x/day, to protect a storage ceiling.
+    # The claim above -- that extra polls are free because the dedupe rejects
+    # them -- stopped being true. Measured over 24h: 6 runs inserted 367,439
+    # rows into model_aq_hourly, ~61k per run, making CAMS the largest source
+    # of PERMANENT growth in the database (the table is now 134 MB). The model
+    # genuinely revises its forecast between publishes; it does not re-emit
+    # identical values. With Neon at 420 MB of a 500 MB hard ceiling, where
+    # exceeding the cap blocks inserts, updates AND deletes, ~120k rows/day is
+    # worth more than the freshness it buys.
+    #
+    # The cost is honest and bounded: at one poll per ~12h publish cycle, a
+    # CAMS update can now be up to 12 hours old rather than 6. get_air_quality
+    # reports model staleness in its quality envelope, so this degrades a
+    # number the agent already discloses rather than hiding one.
+    # Revisit after the demo window; this is a storage decision, not a
+    # judgement about the right sampling rate.
     # Offset off :00/:15/:30/:45. Measured 2026-09-22: two hours after these
     # workflows registered, GitHub had fired ZERO scheduled runs across all
     # five, while manual dispatches of the same files succeeded. Nothing in the
@@ -18,7 +35,7 @@ on:
     # on the default branch, valid expressions. The quarter-hour boundaries are
     # the most contended slots on the platform and GitHub drops scheduled
     # events under load, so the schedule now avoids them.
-    - cron: '57 1,7,13,19 * * *'
+    - cron: '57 1,13 * * *'
   workflow_dispatch:
 
 concurrency:

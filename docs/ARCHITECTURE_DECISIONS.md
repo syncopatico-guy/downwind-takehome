@@ -2120,6 +2120,94 @@ working; lose polish and the new-technology showcase before losing a requirement
 
 ---
 
+## Decision 8 — Deployment
+
+### 8a. Host — Vercel Hobby
+
+Free, and verified against the current limits rather than recalled ones.
+
+**A correction worth recording.** The plan initially assumed Hobby capped function
+duration at 60 s, which would have forced a Pro upgrade for the measured ~100 s agent
+run. That is stale: with Fluid compute, Hobby is **300 s default and maximum**. The
+existing `export const maxDuration = 120` on `/api/ask` fits with room to spare, and no
+paid plan is needed.
+
+Neither included allowance binds. Provisioned memory (360 GB-hrs) covers roughly 5,400
+agent runs at the 120 s ceiling, and Active CPU excludes I/O wait — which is where
+nearly all of the agent's latency lives, since it is waiting on Anthropic and Neon.
+**The binding constraint is the Anthropic credit, not the host.**
+
+Hobby's fair-use terms restrict it to non-commercial, personal use. A take-home demo
+qualifies; noted so the constraint is known rather than discovered.
+
+### 8b. Function region — `cle1`, not the default
+
+The Neon endpoint is in **us-east-2**. Vercel defaults functions to `iad1`
+(us-east-1). `cle1` is us-east-2. Hobby permits a single region but allows choosing
+which, so `vercel.json` pins `regions: ["cle1"]`.
+
+This is free and removes a cross-region hop from every tool call — and the agent makes
+many per question, each a database round trip.
+
+### 8c. Access — public, bounded by spend rather than by authentication
+
+**Chosen:** a fully public URL. **Rejected:** Vercel Authentication plus a Shareable
+Link, both of which Hobby includes.
+
+`DAILY_SPEND_CAP_USD = 2.0` is a *global* ceiling rather than per-caller, so exposure is
+about $2/day regardless of traffic — roughly $10 across a five-day review window, inside
+the $20 account cap. Authentication would put friction between a reviewer and the demo
+to mitigate a risk that is already bounded financially.
+
+**Known limitation:** the cap is evaluated at request start against already-logged
+spend, so a burst of concurrent requests can overshoot it. Bounded, not exact.
+
+### 8d. Model at deploy — Opus
+
+`AGENT_MODEL=claude-opus-5`. Decision 5f measured Opus ahead of Sonnet on the same
+question (13 claims against 7). At roughly $0.15 blended, the $2/day cap allows about
+13 questions per day — ample for one or two reviewers, and it only bites under abuse.
+
+### 8e. Storage was the real deployment risk, not the deploy
+
+Neon Free allows **0.5 GB per project**, and exceeding it causes *inserts, updates and
+deletes* to fail. At 420 MB and roughly 31 MB/day the runway was about **2.5 days** —
+inside the review window. This would have failed mid-review, and reads would have kept
+working while the live tail of the timeline silently stopped advancing.
+
+Two actions taken before deploying:
+
+| Action | Measured result |
+|---|---|
+| `VACUUM FULL hourly_frames` | 50 MB → **26 MB**; database 420 MB → **396 MB** |
+| CAMS cron `4×/day` → `2×/day` | Halves the largest source of permanent growth |
+
+**A correction worth recording.** The CAMS change was justified from a 24-hour
+`rows_inserted` total of 367,439. That figure is contaminated: every row in
+`model_aq_hourly` carries today's `ingest_time`, because the table was backfilled today
+— so the window mixes a one-time backfill with steady-state cron, exactly as the
+`openaq/backfill:7d` rows in the same window do. The thinning stands as a precaution and
+costs only model freshness that `get_air_quality` already discloses, but the evidence
+cited for it did not support the weight placed on it. **Clean baseline: 396 MB at
+2026-09-22 ~18:40 UTC**, to be re-measured over a backfill-free window.
+
+Also measured, and contrary to expectation: `hourly_frames` had **zero dead tuples**
+before the vacuum. The `--vacuum` in `build:frames` is working exactly as designed; plain
+`VACUUM` simply cannot return free pages to the operating system. The 24 MB reclaimed was
+in-page free space, and it will drift back up as upserts continue, since ~50 MB was the
+working-set equilibrium. The other large tables (`model_aq_hourly` 134 MB,
+`weather_hourly` 121 MB, `aq_measurements` 66 MB) all show zero dead tuples — they are
+append-only with `ON CONFLICT DO NOTHING`, so their size is genuine data and no reclaim
+is available there.
+
+**Deliberately not done:** OpenAQ stays hourly. It inserts ~4,860 rows/day against
+CAMS's tens of thousands, so thinning it would have worsened the already-documented
+2.59 readings/station/day for negligible storage benefit. Thinning the whole hourly
+workflow — the obvious reading of "thin the cron" — would have done precisely that as a
+side effect.
+
+---
+
 ## Open items
 
 ### Blocking — required to proceed
@@ -2225,3 +2313,8 @@ the first route or component is written.
 | 6b | Map stack | MapLibre GL | deck.gl |
 | 6c | Cold open | Seeded state + example questions | Empty state |
 | 7 | Cut order | Eval set, then DuckDB-WASM | Cut seeded episode |
+| 8a | Host | Vercel Hobby (300s max duration covers the ~100s agent) | Pro, on a stale 60s assumption |
+| 8b | Function region | `cle1` (us-east-2), co-located with Neon | The `iad1` default, a region away from the database |
+| 8c | Access | Public; exposure bounded by the $2/day global spend cap | Vercel Authentication + Shareable Link (friction for a bounded risk) |
+| 8d | Model at deploy | `claude-opus-5` | Sonnet (cheaper, measurably weaker in 5f) |
+| 8e | Storage runway | `VACUUM FULL` + halve CAMS cadence | Upgrading Neon (~$19/mo); thinning OpenAQ (would worsen the thin feed for ~1% of the benefit) |
