@@ -237,7 +237,12 @@ async function main(): Promise<void> {
   const mode = arg('mode') ?? 'both';
   const dryRun = hasFlag('dry-run');
   const pastDays = Number(arg('past-days') ?? 7);
-  const forecastDays = Number(arg('forecast-days') ?? 2);
+  // 24h, not 48h. Forecast hours were 48 of the 72 requested, and each model
+  // cycle revises them -- genuine revisions worth keeping, but they were the
+  // dominant source of storage growth (~74 MB projected over two days against
+  // a 500 MB ceiling). 24h is also where wind forecasts are most trustworthy
+  // for smoke transport, so the horizon lost is the least reliable part.
+  const forecastDays = Number(arg('forecast-days') ?? 1);
   const triggerKind = (arg('trigger') ?? 'cron') as TriggerKind;
 
   console.log(`\nOpen-Meteo — mode=${mode}${dryRun ? ' (DRY RUN)' : ''}\n`);

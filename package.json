@@ -14,7 +14,8 @@
     "ingest:openaq": "tsx scripts/ingest-openaq.ts",
     "ingest:openmeteo": "tsx scripts/ingest-openmeteo.ts",
     "cluster:fires": "tsx scripts/cluster-fires.ts",
-    "attribute:smoke": "tsx scripts/attribute-smoke.ts"
+    "attribute:smoke": "tsx scripts/attribute-smoke.ts",
+    "build:frames": "tsx scripts/build-frames.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.127.0",

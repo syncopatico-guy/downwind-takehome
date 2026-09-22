@@ -20,8 +20,8 @@ interactive replay timeline, deployed publicly.
 | 6 | GitHub Actions cron | **done** — 5 workflows, 173 runs/day, all paths tested |
 | 7 | Fire clustering | **done** — 617 clusters, identity verified stable |
 | 8 | Smoke attribution | **done** — 1,270 attributions, 20.9% of elevated hours explained |
-| 9 | `hourly_frames` rollup | next |
-| 10 | September 2020 seed backfill | |
+| 9 | `hourly_frames` rollup | **done** — 165k frames, 28 MB |
+| 10 | September 2020 seed backfill | decision pending |
 | 11 | Query layer — the nine agent tools | |
 | 12 | The agent | |
 | 13 | Parquet export + DuckDB-WASM scrub | |
@@ -32,7 +32,7 @@ interactive replay timeline, deployed publicly.
 **Verified state after Step 4:** 7,431 fire detections over 8 days; 890 alerts,
 all with resolvable geometry; 429 zones cached; 134,652 AQ measurements across
 1,193 stations, with 434–438 H3 r4 cells covered on every day of the seven-day
-window. Database **308 MB** of a 500 MB ceiling. Three of five feeds live.
+window. Database **337 MB** of a 500 MB ceiling. Three of five feeds live.
 
 **Storage watch — now the live constraint.** 267 MB of 500 MB used. Remaining
 ~233 MB covers the 2020 seed, attribution and frames; a 5–6 day seed would cost

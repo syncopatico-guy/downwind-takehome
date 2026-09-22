@@ -7,7 +7,7 @@ across Western North America, using five real-time data feeds.
 technical decision, the alternatives that were considered, and the reasoning that
 selected one over the others. It is maintained continuously as the build proceeds.
 
-**Status:** Live document. Last updated at end of **Step 8** (smoke attribution).
+**Status:** Live document. Last updated at end of **Step 9** (hourly frames).
 
 ---
 
@@ -1241,6 +1241,68 @@ recorded in 3p.
 `trigger_kind=cron, status=ok, rows_inserted=1`. GitHub Actions → repository
 secrets → ingester → Neon is a working path.
 
+### 4i. Frames, and two aggregation lessons
+
+`hourly_frames` is one row per (hour, H3 r4 cell) — 165,012 rows across 180
+hours and 1,111 cells, **28 MB**. They are written **sparsely**: only cell-hours
+where something was observed, because a cartesian product over hours x cells
+would be mostly empty. r4 (~1,770 km², 26 km edge) is fine enough for a
+regional map and coarse enough that a week of frames stays a small Parquet file
+for the browser.
+
+`is_partial` and `missing_sources` make a gap **visible rather than
+interpolated**, and crucially they are computed against *expectation*: a cell
+with no station was never going to carry observed air quality, so reporting
+that as a gap would be noise. Only a cell that normally carries a feed and has
+none this hour is partial. Result: 156,963 complete frames, 7,569 missing only
+`openaq`, 403 missing two feeds, 77 missing all three.
+
+#### Lesson 1: a regional maximum is not a regional condition
+
+The first timeline view plotted `max(us_aqi_max)` across every cell. The line
+sat flat at **350–366 ("Hazardous") every hour**, while the regional median AQI
+was **39**.
+
+The data was fine — AQI distribution is p50 39 / p90 59 / p99 79, internally
+consistent with its own PM2.5 (AQI 0–50 averages 4.6 µg/m³; AQI 301+ averages
+306.8). **Only the aggregation was wrong.** A maximum over 3 million km² is
+always extreme somewhere, so it reported the worst single station as though it
+were the regional state — technically true, practically a lie.
+
+Replaced with percentiles (p50 / p90 / p99), with the maximum retained but
+renamed `pm25_worst_cell` and `us_aqi_worst_cell` so a single hot station
+cannot masquerade as the regional condition. The corrected series reads
+sensibly: p50 4–5, p90 10–14, p99 24–37, worst cell 88–694.
+
+#### Lesson 2: wind direction cannot be averaged arithmetically
+
+Averaging 350° and 10° arithmetically gives 180° — the exact opposite
+direction. Frames use a vector mean (`atan2` of mean sine and mean cosine).
+Worth recording because the arithmetic version would have produced plausible
+numbers that were systematically wrong, and attribution depends on direction.
+
+#### Corroboration: what to do with a 985 µg/m³ reading
+
+The most extreme observations have no attributable fire, and a neighbour
+comparison explains why:
+
+| Reading | Tier | Neighbours within 25 km | Their median | Ratio |
+|---|---|---|---|---|
+| **985 µg/m³** | **reference** (AirNow) | 8 | 10.0 | **99x** |
+| 707 | low_cost | 4 | 4.9 | **144x** |
+| 731 | low_cost | 5 | 13.0 | 56x |
+| 694 | low_cost | **0** | — | uncorroborable |
+
+Eight stations reading ~10 while one reads 985 is close to conclusive: a sensor
+artifact or an extremely local source, not regional smoke — and notably it is a
+*reference-grade* monitor, so instrument tier is no guarantee.
+
+`v_reading_corroboration` exposes the neighbour comparison rather than a
+verdict. A 130x spike could be a structure fire or a calibration fault, and the
+honest move is to give the agent the evidence and let it say which is
+plausible. Where a station has no neighbours, the view reports that rather than
+implying anything.
+
 ## Decision 5 — The agent
 
 ### Governing principle: the model never performs arithmetic
@@ -1543,6 +1605,9 @@ the first route or component is written.
 | 3u | Cluster labels | Containing zone only (135 correct) | Nearest zone (223 of 358 wrong) |
 | 3v | Attribution bounds | Attributable fires only + anomaly trigger | Unbounded (284M pairs) |
 | 3w | Travel time | Single-step back-trajectory | Ignore lag; full iterative trajectory |
+| 4i | Frame grain | Sparse (hour x r4 cell), 28 MB | Dense cartesian product |
+| 4j | Regional series | Percentiles, max renamed 'worst_cell' | max() (read flat Hazardous) |
+| 4k | Forecast horizon | 24h, to cap revision-driven growth | 48h (~74 MB over 2 days) |
 | 4a | Store | Neon Postgres + PostGIS | ClickHouse Cloud (no durable free tier) |
 | 4e | Storage headroom | 267/500 MB; narrow the seed first if pressed | Cut a graded deliverable |
 | 4f | Cron + repo visibility | Public repo, per-feed Actions cadences | Private with 2h polling (~1,260 min/month) |

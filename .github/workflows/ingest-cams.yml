@@ -37,4 +37,4 @@ jobs:
           OPENAQ_API_KEY: ${{ secrets.OPENAQ_API_KEY }}
           NWS_USER_AGENT: ${{ secrets.NWS_USER_AGENT }}
         run: |
-          npm run ingest:openmeteo -- --mode=cams --trigger=cron --past-days=1 --forecast-days=2
+          npm run ingest:openmeteo -- --mode=cams --trigger=cron --past-days=1 --forecast-days=1

@@ -44,4 +44,4 @@ jobs:
           # after ~4 requests with past_days=1, so the limit tracks locations
           # per request (or requests per minute), not the span requested.
           npm run ingest:openaq -- --mode=latest --trigger=cron --budget=10
-          npm run ingest:openmeteo -- --mode=weather --trigger=cron --past-days=1 --forecast-days=2
+          npm run ingest:openmeteo -- --mode=weather --trigger=cron --past-days=1 --forecast-days=1
