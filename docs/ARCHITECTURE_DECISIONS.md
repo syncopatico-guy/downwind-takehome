@@ -7,7 +7,7 @@ across Western North America, using five real-time data feeds.
 technical decision, the alternatives that were considered, and the reasoning that
 selected one over the others. It is maintained continuously as the build proceeds.
 
-**Status:** Live document. Last updated at end of **Step 7** (fire clustering).
+**Status:** Live document. Last updated at end of **Step 8** (smoke attribution).
 
 ---
 
@@ -937,6 +937,87 @@ cache: only 429 zones are stored, being those an alert happened to reference.
 Pre-loading all ~1,550 zones would raise coverage at roughly 20 MB — declined
 for now against a storage budget already at 267 MB with the 2020 seed pending.
 
+### 3v. Smoke attribution — the system's one causal claim
+
+This is the only place the system asserts causation, so it is framed as a
+**hypothesis carrying its evidence** rather than a conclusion. Every row stores
+the numbers that produced it: distance, wind alignment, travel time, fire
+intensity at the hour the smoke would have departed, and mixing depth.
+
+#### It had to be bounded, and the bounds are principled
+
+Unbounded this is **800 stations x 576 hours x 617 fires = 284M pairs.** Two
+bounds reduce it to ~1,300 stored rows:
+
+1. **Only attributable fires** — 122 of 617. The excluded 495 are
+   `indeterminate` (fewer than 10 detections) and carry 13.6% of FRP between
+   them; they could not be meaningfully attributed to a downwind reading.
+2. **Only station-hours with something to explain** — PM2.5 at 2x the
+   station's *own* 7-day median AND at least 8 µg/m³. Relative because
+   low-cost sensors carry different offsets, so a fixed threshold would miss
+   real elevation at a clean rural station and over-trigger at an urban one;
+   the absolute floor stops a 1→2.5 µg/m³ rise counting as an event.
+   **Attribution explains anomalies, not baselines.**
+
+#### Travel time: a single-step back-trajectory
+
+Smoke from 100 km away at 20 km/h departed five hours ago, so **the fire's
+state then is what matters** — scoring against its intensity on arrival would
+credit a fire that had only just ignited.
+
+There is a circularity: travel time depends on wind speed, which one would want
+at the departure hour, which depends on travel time. It is broken by estimating
+the lag from wind speed at the *arrival* hour, then reading wind direction and
+fire intensity at the resulting earlier hour. Fire intensity is summed over a
+±90-minute window, because a satellite overpass need not coincide with the
+exact hour.
+
+Rejected: ignoring lag entirely (wrong by hours at regional distances); a full
+iterative trajectory through the curved wind field (physically strongest, too
+much modelling risk with two days left).
+
+#### Scoring
+
+Four interpretable factors, each stored separately so the agent can say *which*
+one carried the claim:
+
+| Factor | Form | Meaning |
+|---|---|---|
+| `alignment_factor` | exp(−(θ/30)²) | did the wind point from fire to station |
+| `distance_factor` | 1/(1+(d/50)²) | dilution with distance |
+| `frp_factor` | ln(1+FRP)/ln(5001) | fire intensity, log-scaled |
+| `pbl_factor` | clamp(800/PBL, 0.5, 2.5) | shallow mixing concentrates smoke at the surface |
+
+A continuous decay by misalignment was chosen over a hard cone, with a 90° cut
+(beyond which it is not downwind at all). Storing `alignment_deg` means the
+agent can distinguish "aligned within 2°" from "within 40°" instead of both
+reading as merely *inside the cone*.
+
+#### Results, including the one that matters most
+
+**Only 20.9% of elevated station-hours (1,015 of 4,858) have a plausible
+upwind fire.** The remaining 79% have none — and that is the correct answer,
+not a coverage failure. Urban PM2.5 comes from traffic, industry, dust and
+cooking; a system that attributed every elevated reading to wildfire smoke
+would be wrong most of the time. **The agent must be able to say "nothing
+explains this."**
+
+Strongest attributions are physically coherent: 27.7 µg/m³ at **8.15x** the
+station baseline, 58.8 km from the Yosemite complex, wind aligned to 7.4°, 6.3
+hour lag, 3,530 MW at departure. Alignments of 2°, 7°, 8° are not coincidences.
+
+**239 station-hours are explained only by industrial sources.** The
+`all_industrial` flag exists precisely so the agent does not report those as
+wildfire smoke.
+
+Mean factor values expose where the scoring gets its discrimination:
+alignment 0.609 (mean 21.1°), distance 0.238 (mean 132 km), frp 0.331, and
+**pbl 2.148** — close to its 2.5 cap, because median mixing depth is 340 m.
+The PBL factor therefore discriminates mainly by *excluding* deep-mixing
+afternoons rather than by grading, and elevated readings concentrate at night
+and early morning. Physically right, and worth stating rather than leaving the
+factor to look more discriminating than it is.
+
 ## Decision 4 — Storage and hosting
 
 Candidate infrastructure was verified against current pricing and feature documentation
@@ -1460,6 +1541,8 @@ the first route or component is written.
 | 3s | Cluster identity | Inherit via exact detection membership | Incremental assignment; H3+time key |
 | 3t | Industrial sources | Flag via FRP variability, do not exclude | Treat as ordinary fires |
 | 3u | Cluster labels | Containing zone only (135 correct) | Nearest zone (223 of 358 wrong) |
+| 3v | Attribution bounds | Attributable fires only + anomaly trigger | Unbounded (284M pairs) |
+| 3w | Travel time | Single-step back-trajectory | Ignore lag; full iterative trajectory |
 | 4a | Store | Neon Postgres + PostGIS | ClickHouse Cloud (no durable free tier) |
 | 4e | Storage headroom | 267/500 MB; narrow the seed first if pressed | Cut a graded deliverable |
 | 4f | Cron + repo visibility | Public repo, per-feed Actions cadences | Private with 2h polling (~1,260 min/month) |

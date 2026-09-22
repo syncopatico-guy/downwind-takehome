@@ -304,12 +304,19 @@ async function main(): Promise<void> {
 
         // Cluster centroids become sample points, which is how Step 5's wind
         // ingestion gets data AT the fires -- the precision attribution needs.
+        //
+        // Only ATTRIBUTABLE clusters: 495 of 617 are 'indeterminate' (fewer
+        // than 10 detections, too sparse to characterise), and they could not
+        // be meaningfully attributed to a downwind reading anyway. Sampling
+        // wind at them would cost ~29 MB to compute scores that round to zero.
+        // The 122 retained carry 86.4% of total FRP.
         await client.query(`
           INSERT INTO sample_points (point_id, point_kind, lat, lon, geom, h3_r5, region, active)
           SELECT 'fire:' || c.cluster_key, 'fire_cluster',
                  ST_Y(c.centroid::geometry), ST_X(c.centroid::geometry), c.centroid,
                  substr(md5(c.cluster_key), 1, 15), c.region, true
-            FROM fire_clusters c WHERE c.is_active
+            FROM fire_clusters c
+           WHERE c.is_active AND c.source_character <> 'indeterminate'
           ON CONFLICT (point_id) DO UPDATE SET
             lat = EXCLUDED.lat, lon = EXCLUDED.lon, geom = EXCLUDED.geom, active = true`);
 
@@ -317,7 +324,8 @@ async function main(): Promise<void> {
           UPDATE sample_points p SET active = false
            WHERE p.point_kind = 'fire_cluster' AND p.active
              AND NOT EXISTS (SELECT 1 FROM fire_clusters c
-                              WHERE c.is_active AND 'fire:' || c.cluster_key = p.point_id)`);
+                              WHERE c.is_active AND c.source_character <> 'indeterminate'
+                                AND 'fire:' || c.cluster_key = p.point_id)`);
 
         console.log(`  written: ${up.rowCount} clusters, labelled ${lbl.rowCount}, ` +
           `deactivated ${deact.rowCount}, orphaned detections ${orphaned.rowCount}`);
