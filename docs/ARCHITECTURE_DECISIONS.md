@@ -7,7 +7,7 @@ across Western North America, using five real-time data feeds.
 technical decision, the alternatives that were considered, and the reasoning that
 selected one over the others. It is maintained continuously as the build proceeds.
 
-**Status:** Live document. Last updated at end of **Step 9** (hourly frames).
+**Status:** Live document. Last updated during **Step 11** (the query layer).
 
 ---
 
@@ -1303,6 +1303,63 @@ honest move is to give the agent the evidence and let it say which is
 plausible. Where a station has no neighbours, the view reports that rather than
 implying anything.
 
+### 4l. The scheduler that never started
+
+Decision 4f chose GitHub Actions and made the repository public to afford
+~11,640 minutes a month of it. Two hours after the five workflows registered,
+`get_data_health` -- the first tool built in Step 11 -- reported that **no
+source was fresh**, and three of the five had never run on a schedule at all.
+
+The platform state was then checked rather than assumed:
+
+| Check | Result |
+|---|---|
+| Repository | public, Actions enabled, `allowed_actions: all`, not archived |
+| Workflows | all five present, `state: active`, on the default branch |
+| Cron expressions | all valid |
+| YAML | `on.schedule` correctly formed in every file |
+| GitHub Actions status | operational |
+| **Scheduled runs, all workflows, all time** | **zero** |
+
+Two `workflow_dispatch` runs of the same files had succeeded, so the path from
+Actions through repository secrets to Neon was proven. Nothing in the
+configuration was wrong. The remaining suspect was contention: every schedule
+sat on `:00`, `:05`, `:15`, `:30` or `:45` -- the busiest slots on the platform
+-- and GitHub delays or drops scheduled events under load.
+
+**Chosen: move the phase, keep the cadence.**
+
+| Workflow | Was | Now |
+|---|---|---|
+| NWS | `*/15` | `8,23,38,53` |
+| FIRMS | `*/30` | `19,49` |
+| hourly | `5` | `34` |
+| CAMS | `15 */6` | `57 1,7,13,19` |
+| roster | `20 4` | `41 4` |
+
+CAMS stays deliberately separated from the hourly job so the two Open-Meteo
+callers never contend for the same rate limit -- 23 minutes apart, against an
+hourly job that finishes in 2-3 minutes under a 15-minute cap.
+
+The five workflows were then dispatched manually **in two batches for the same
+reason**: firing all five at once would have put both Open-Meteo callers and
+both OpenAQ callers on the wire simultaneously, which is precisely the
+contention the offsets exist to prevent. All five succeeded, and every source
+moved to `fresh`.
+
+**Two things worth keeping from this.** First, the health tool found the fault
+before a human did, on the day it was built, which is the argument for building
+`get_data_health` first. Second, the fix is unproven: the offsets are a
+plausible remedy for a diagnosis that could not be confirmed, because "GitHub
+did not schedule anything" has no error message attached. If scheduled runs
+still do not appear, the cause was not contention and the next suspect is an
+account-level restriction -- the Actions billing endpoint needs a token scope
+we do not hold, so it could not be ruled out.
+
+**Unrelated, noted in passing:** `actions/checkout@v4` and `actions/setup-node@v4`
+target Node 20, which is deprecated; the runner forces them onto Node 24. Not
+breaking, not yet worth a commit.
+
 ## Decision 5 — The agent
 
 ### Governing principle: the model never performs arithmetic
@@ -1366,6 +1423,49 @@ passes that position as `as_of`, and **the agent answers as the world was known 
 This is the single choice that makes the timeline and the conversation *one instrument*
 rather than two features sharing a page, and it is only possible because Decision 3a chose
 bitemporal storage.
+
+#### The correction: one clock was the wrong number
+
+Measured against the live database at the start of Step 11, this design does
+not work as written. `WHERE ingest_time <= as_of` with the scrub handle three
+days back returns **zero rows** -- from every raw table:
+
+| Scrub to 3 days ago | `ingest_time <=` | `event_time <=` |
+|---|---|---|
+| `fire_detections` | **0** | 4,417 |
+| `aq_measurements` | **0** | 78,208 |
+| `weather_hourly` | **0** | 92,200 |
+
+The cause is obvious in hindsight and was invisible in planning: the entire
+seven-day history arrived in a single backfill sitting, so **knowledge-time is
+only as deep as our collector is old** -- 5.1 hours at the time of measuring,
+growing an hour per hour. Event-time spans roughly eight days of history plus
+two of forecast. A scrub handle riding on the knowledge clock would show an
+empty map everywhere except the last few hours.
+
+**Chosen: two parameters, not one.** Event time (`at`, or `from`/`to`) is the
+primary axis and drives the scrub; `known_as_of` is a separate optional
+knowledge cutoff defaulting to now. Both replays from Decision 3a survive, the
+timeline works over its full depth, and the shallow knowledge history becomes a
+measured caveat in the envelope rather than a silently empty result.
+
+| Alternative | Why rejected |
+|---|---|
+| **Event time only** | Simplest signatures, and the scrub just works. Rejected because it abandons the "what did we know then" replay entirely -- the `ingest_time` column would remain in the schema with nothing querying it. |
+| **One `as_of` applying both predicates** | The pure replay reading, exactly as originally specified, and correct once history accumulates. Rejected because today it makes the demo timeline 5 hours deep instead of 8 days. |
+
+The bitemporal payoff is real but narrower than claimed: `weather_hourly`
+holds 14,344 keys with three revisions and 21,896 with two, so forecast
+revision history genuinely exists -- within the window our collector has been
+running.
+
+**A second limitation, found while implementing.** The three derived tables
+each hold exactly **one distinct `computed_at`** (617 clusters, 1,270
+attributions, 165,012 frames) and no `ingest_time` at all, because each is
+recomputed wholesale rather than accumulated. A knowledge cutoff is therefore
+unanswerable over them. Tools reading derived data return
+`known_as_of_applied: false` with the reason, rather than accepting the
+parameter and ignoring it.
 
 ### 5d. Agent loop — SDK Tool Runner
 
@@ -1447,6 +1547,98 @@ separating a production agent from a demo. Scheduled as a day-3 stretch goal, an
 the cut order (Decision 7).
 
 ---
+
+### 5h. The query layer — what the nine tools do and do not promise
+
+Four decisions were settled before the first tool was written. Each is recorded
+with what it costs, because each declines something a reviewer might expect.
+
+#### Places resolve locally, or not at all
+
+**Chosen:** a gazetteer built only from data we already hold -- NWS zone names,
+air-quality station names and localities, and fire cluster labels. No external
+geocoder.
+
+| Alternative | Why rejected |
+|---|---|
+| **Local first, external geocoder as fallback** | Resolves places we hold no data for. Rejected because that is exactly the failure mode: a geocoder returns a confident coordinate for a place with no station, no zone and no detections, attaching precision to an empty answer. A place we cannot name is usually a place we cannot answer about, and saying so is the more useful result. |
+
+Measured, the local gazetteer is better than expected: Seattle, Portland,
+Sacramento, Reno, Boise, Missoula, Calgary, Medford and Yosemite all resolve.
+Two fixes were needed. Leading articles defeated substring matching -- "the
+Sierra" matched nothing against a zone literally named `Sierra` -- so filler
+words are stripped and, failing that, the longest significant token is retried.
+And **ambiguity is surfaced, never resolved silently**: "Vancouver" returns
+Portland-Vancouver-Beaverton and North Vancouver BC, 420 km apart, with a
+caveat instructing the agent to state which it used or ask.
+
+#### Ranked places are cells, and cells are named conservatively
+
+`rank_places` ranks H3 r4 cells rather than stations, because Decision 4i
+already established that a maximum over a region is not a regional condition;
+each cell carries its station count and percentiles so one hot sensor cannot
+pose as a region.
+
+Cells are labelled **only by a zone that provably contains them** -- Decision 3u
+measured nearest-zone labelling naming a neighbouring region 223 times out of
+358. Measured coverage under the containment rule: **264 of 1,111 cells named,
+23.8%.** The remaining 76% are described by coordinates. That is the intended
+trade, and it is bounded by the zone cache (429 zones, being those an alert
+happened to reference) rather than by the rule.
+
+#### Conflicts: two axes, measured thresholds
+
+| Axis | Rule | Fires on |
+|---|---|---|
+| **Model vs measurement** | ratio > 2x **and** absolute difference > 10 µg/m³ | **10.6%** of 113,192 paired station-hours |
+| **Sensor vs neighbours** | `v_reading_corroboration`, attached to extreme readings | readings >= 100 µg/m³ only |
+
+The threshold was chosen by measuring alternatives rather than by taste: 2x
+with a 5 µg/m³ floor fires on 28% (too noisy to mean anything), a flat 15 µg/m³
+absolute on 4.1%.
+
+**Why both, rather than the cheaper one alone.** Model-vs-measurement can
+report that two numbers disagree but cannot say which is wrong, because CAMS is
+a weak arbiter by our own measurement -- 42% high, r=0.118 (Decision 3p).
+Neighbours are a strong arbiter. Together they discriminate three cases that
+matter: model high while neighbours read normal (CAMS bias), sensor extreme
+while both model and neighbours read normal (probable fault), and all three
+elevated (real smoke, and a claim the agent can make confidently). Without
+corroboration the agent would have to either report 985 µg/m³ as hazardous air
+or refuse to discuss the most extreme readings in the dataset.
+
+**Deliberately deferred:** advisory-vs-measurement conflict, and computed
+`gaps`. Both return `null` with an explicit `computed: false` flag rather than
+an empty array -- **an empty array is a claim.** `gaps: []` reads as "we checked
+and found none", so anything not computed must say it was not computed.
+Advisory conflict is the most redundant of the three axes and is nearly inert
+live, with one active alert against 901 historical.
+
+#### First application code: library plus one route
+
+The tools are pure functions in `lib/tools/` with Zod input schemas, so Step 12
+derives the Anthropic tool definition from the same object that validates the
+call rather than maintaining a JSON Schema alongside it. A single dynamic route
+handler dispatches them over HTTP -- small, but it exercises the Next 16
+conventions on day 2 rather than day 3, and it is the path the evidence drawer
+will use.
+
+Per Decision 4d the tools use `@neondatabase/serverless`. Measured, that driver
+costs a round trip per statement (~75-115 ms from a laptop to us-east-2 against
+~30 ms on a warm pooled `pg` socket), so tools issue independent reads through
+`Promise.all` rather than serially. One incidental cost of this discipline was
+found and fixed immediately: cell labelling first ran the same containment
+search three times per cell and took 2.0 s over 1,111 cells; one `LATERAL`
+gives the same answer in 744 ms.
+
+#### Citations
+
+Every returned row carries a `record_id` shaped `<entity>:<primary key>` --
+`aq_measurement:842193`, `fire_detection:5512`, `frame:2026-09-21T18:00Z:8428...`.
+`provenance.record_ids` is their union, which is what Step 12 validates claims
+against. `explain_smoke` therefore reads `smoke_attributions` directly for a
+citable `attribution_id` and uses `v_smoke_explanations` only for the summary,
+because the view exposes no id column.
 
 ## Decision 6 — The interface
 
@@ -1611,6 +1803,7 @@ the first route or component is written.
 | 4a | Store | Neon Postgres + PostGIS | ClickHouse Cloud (no durable free tier) |
 | 4e | Storage headroom | 267/500 MB; narrow the seed first if pressed | Cut a graded deliverable |
 | 4f | Cron + repo visibility | Public repo, per-feed Actions cadences | Private with 2h polling (~1,260 min/month) |
+| 4l | Cron phase | Offset off :00/:15/:30/:45; cadence unchanged | Wait for GitHub's scheduler to start on its own |
 | 4g | Freshness population | Measure over cron runs only; one-offs excluded | Count every run (produced false staleness) |
 | 4d | DB drivers | `pg` for scripts, `@neondatabase/serverless` for routes | One driver everywhere |
 | 4b | Ingestion trigger | GitHub Actions cron | Vercel Cron (daily-only on Hobby) |
@@ -1618,6 +1811,11 @@ the first route or component is written.
 | 5a | Data access | Nine curated tools, no raw SQL | Text-to-SQL |
 | 5d | Agent loop | SDK Tool Runner, two-phase with compose | Manual loop |
 | 5e | Grounded output | Structured claims + citations | Prose with inline markers |
+| 5c | Time on the tool surface | Event time drives the scrub; `known_as_of` separate | Single `as_of` on `ingest_time` (returned zero rows) |
+| 5h | Place resolution | Local gazetteer only; ambiguity surfaced | External geocoder fallback |
+| 5h | Cell labelling | Containing zone only (23.8% named) | Nearest zone (wrong 223/358 in 3u) |
+| 5h | Conflict axes | Model-vs-measurement + sensor-vs-neighbours | Model-vs-measurement alone (cannot adjudicate) |
+| 5h | Uncomputed quality | `null` with `computed: false` | Empty array (reads as "none found") |
 | 5f | Model | `claude-opus-5`, effort routing | Sonnet 5 |
 | 6a | Layout | Map-dominant, docked chat + timeline | Conversation-dominant |
 | 6b | Map stack | MapLibre GL | deck.gl |

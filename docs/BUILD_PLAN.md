@@ -21,8 +21,8 @@ interactive replay timeline, deployed publicly.
 | 7 | Fire clustering | **done** — 617 clusters, identity verified stable |
 | 8 | Smoke attribution | **done** — 1,270 attributions, 20.9% of elevated hours explained |
 | 9 | `hourly_frames` rollup | **done** — 165k frames, 28 MB |
-| 10 | September 2020 seed backfill | decision pending |
-| 11 | Query layer — the nine agent tools | |
+| 10 | September 2020 seed backfill | **skipped deliberately** — live data has a real attributable event |
+| 11 | Query layer — the nine agent tools | **in progress** — envelope, time, sql, place, `get_data_health`, `resolve_place` done |
 | 12 | The agent | |
 | 13 | Parquet export + DuckDB-WASM scrub | |
 | 14 | Interface | |
@@ -148,11 +148,18 @@ The core feature. Upwind cone weighted by fire radiative power and distance.
 ### Step 11 — Query layer
 
 First application code, so the `AGENTS.md` requirement to read
-`node_modules/next/dist/docs/` applies here.
+`node_modules/next/dist/docs/` applies here. Done: Next 16.3.5, and
+`npx next typegen` resolves the `LayoutProps` error outright.
 
 - The nine tools, each returning the provenance envelope
   (`data` / `provenance` / `quality`)
-- `as_of` parameter on every tool, defaulting to now
+- **Two** time parameters, not one: event time (`at` / `from` / `to`) drives
+  the scrub; `known_as_of` is a separate optional knowledge cutoff. The
+  original single-`as_of`-on-`ingest_time` design was disproved by measurement
+  — it returns zero rows beyond ~5 hours back. See 5c in the decision record.
+- Conflicts shipping: model-vs-measurement and sensor-vs-neighbours. Advisory
+  conflict and computed `gaps` deferred, returning `null` with
+  `computed: false` rather than an empty array.
 
 ### Step 12 — The agent
 

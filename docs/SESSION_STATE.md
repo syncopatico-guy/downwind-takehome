@@ -28,7 +28,7 @@ the way they are) and `BUILD_PLAN.md` (what's done and what's next).
 
 ---
 
-## Status: Steps 1–9 done · Step 10 **deliberately skipped** · next is **Step 11**
+## Status: Steps 1–9 done · Step 10 **deliberately skipped** · Step 11 **in progress**
 
 | Step | State |
 |---|---|
@@ -42,7 +42,7 @@ the way they are) and `BUILD_PLAN.md` (what's done and what's next).
 | 8 Smoke attribution | done — 1,270 attributions |
 | 9 `hourly_frames` | done — 165k frames |
 | **10 Sept 2020 seed** | **SKIPPED** — see below |
-| **11 Query layer (9 tools)** | **NEXT** |
+| **11 Query layer (9 tools)** | **IN PROGRESS** — see below |
 | 12 The agent | |
 | 14 Interface (13 folded in) | |
 | 15 Deploy | |
@@ -76,6 +76,16 @@ both deliverable requirements were still unbuilt, and all of that value lives in
 revisions (~37 MB/day at a 24h horizon). Levers, in order: narrow any seed;
 prune superseded rows older than 3 days; drop the CAMS grid.
 
+**Cron status (2026-09-22):** for the first two hours after registration
+GitHub fired **zero** scheduled runs across all five workflows, while manual
+dispatches of the same files succeeded. Configuration was verified correct
+throughout. All five cron expressions were moved off the contended
+`:00/:15/:30/:45` boundaries (cadences unchanged) and all five workflows were
+dispatched manually in two batches — batched so the two Open-Meteo callers and
+the two OpenAQ callers never ran concurrently. All five succeeded; every source
+now reports `fresh`. **Whether the offsets actually fix scheduling is unproven
+— check `gh run list --event schedule` early next session.**
+
 Coverage: 5 feeds, **7+ days of history on every one**. 800 selected AQ
 stations covering 438 H3 r4 cells. 617 fire clusters (88 `likely_wildfire`,
 34 `likely_industrial`, 495 `indeterminate`).
@@ -98,9 +108,10 @@ GitHub repo secrets: `DATABASE_URL`, `OPENAQ_API_KEY`, `NWS_USER_AGENT`.
 **Never paste secret values into GitHub with surrounding quotes** — they are
 stored literally, and a quoted URL fails with `getaddrinfo ENOTFOUND base`.
 
-`gh` CLI is **not installed**. Consequence: Actions logs cannot be read
-(anonymous API returns 403) and workflows cannot be triggered from here — the
-user must do both. Installing `gh` would remove that round-trip.
+`gh` CLI **is installed and authenticated** (2.101.0, account
+`syncopatico-guy`, scopes `gist read:org repo workflow`). Actions logs are
+readable and workflows dispatchable from here. The Actions *billing* endpoint
+is not — it needs a `user` scope this token does not carry.
 
 ---
 
@@ -128,11 +139,17 @@ Most accept `--dry-run` and `--budget=<minutes>`. Migrations are numbered
 ## Things that will bite a fresh session
 
 1. **`AGENTS.md` requires reading `node_modules/next/dist/docs/` before writing
-   any app code.** This is a modified Next.js with breaking changes. **Step 11
-   is the first app code**, so do that read first. `app/layout.tsx` currently
-   fails typecheck with `Cannot find name 'LayoutProps'` — that is scaffold
-   code awaiting Next's type generation, not our bug. Filter it when checking:
-   `npx tsc --noEmit -p tsconfig.json 2>&1 | grep -v LayoutProps`
+   any app code.** This is a modified Next.js (16.3.5) with breaking changes.
+   **The `LayoutProps` typecheck error is solved** — `npx next typegen`
+   generates it, typecheck then exits 0, and the output lands in `.next/` so
+   the tree stays clean. The grep filter is no longer needed; the verification
+   command is now:
+   `npx next typegen && npx tsc --noEmit -p tsconfig.json`
+   What actually bites from Next 16: request APIs are async-only (`params` is a
+   Promise), route context types come from `RouteContext<'/api/...'>` which
+   typegen produces, route handlers are uncached by default, `use cache` cannot
+   sit inline in a handler body, and the edge runtime is deprecated so `nodejs`
+   is the default.
 2. **Load the `claude-api` skill before writing agent code.** Model is
    `claude-opus-5`; `budget_tokens` is rejected; use
    `thinking: {type:"adaptive"}` and `output_config.effort`.
@@ -155,7 +172,34 @@ Most accept `--dry-run` and `--budget=<minutes>`. Migrations are numbered
 
 ---
 
-## Step 11 — the nine tools (next)
+## Step 11 — the nine tools (in progress)
+
+### Built and verified against live data
+
+| File | State |
+|---|---|
+| `lib/tools/envelope.ts` | done — envelope, record ids, `computed: false` discipline |
+| `lib/tools/time.ts` | done — both clocks, one place |
+| `lib/tools/sql.ts` | done — Neon serverless driver, cached source registry |
+| `lib/tools/types.ts` | done — `ToolDefinition` shape |
+| `lib/tools/place.ts` | done — gazetteer + conservative cell labelling |
+| `lib/tools/get-data-health.ts` | **done, verified** — 5 sources, 200 ms |
+| `lib/tools/resolve-place.ts` | done — ambiguity surfaced, not resolved |
+| `get_air_quality` | next |
+| `get_fires` / `get_wind` / `get_alerts` | not started |
+| `explain_smoke` | not started |
+| `compare_time` / `rank_places` | not started |
+| `registry.ts` | not started |
+| `app/api/tools/[tool]/route.ts` | not started |
+| `scripts/verify-tools.ts` | not started |
+
+**This work is uncommitted** — `lib/tools/` is untracked.
+
+Build order for the rest: the four readers, then `explain_smoke`, then
+`compare_time`/`rank_places`, then the registry and route, then the
+verification script.
+
+### The contract
 
 Each returns the same envelope, which is where provenance and quality live:
 
@@ -179,10 +223,24 @@ Each returns the same envelope, which is where provenance and quality live:
 | `rank_places` | `hourly_frames` / `v_timeline_series` |
 | `get_data_health` | `v_source_health`, `v_feed_variant_health`, `v_roster_coverage` |
 
-**Every tool takes an optional `as_of`.** Default is now; the UI passes the
-scrub position, so the agent answers *as the world was known then*
-(`WHERE ingest_time <= as_of`). This is the single thing that makes the
-timeline and the conversation one instrument.
+**Every tool takes TWO time parameters, not one.** This was corrected by
+measurement — see 5c in the decision record.
+
+- **Event time** (`at`, or `from`/`to`) is the primary axis and drives the
+  scrub. Depth: ~8 days of history plus 2 of forecast.
+- **`known_as_of`** is the optional knowledge cutoff (`ingest_time <=
+  known_as_of`), defaulting to now. Depth: **only as old as our collector** —
+  5.1 h when measured, growing an hour per hour.
+
+The original single-`as_of`-on-`ingest_time` design returns **zero rows** for a
+scrub position three days back, because the whole history arrived in one
+backfill. Do not reinstate it.
+
+The three derived tables (`fire_clusters`, `smoke_attributions`,
+`hourly_frames`) hold a single `computed_at` and no `ingest_time`, so they
+cannot honour a knowledge cutoff at all. Their tools return
+`known_as_of_applied: false` with the reason rather than ignoring the
+parameter.
 
 ### Facts the tools must surface honestly
 
