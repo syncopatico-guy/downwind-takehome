@@ -12,7 +12,8 @@
     "verify:schema": "tsx scripts/verify-schema.ts",
     "ingest:nws": "tsx scripts/ingest-nws.ts",
     "ingest:openaq": "tsx scripts/ingest-openaq.ts",
-    "ingest:openmeteo": "tsx scripts/ingest-openmeteo.ts"
+    "ingest:openmeteo": "tsx scripts/ingest-openmeteo.ts",
+    "cluster:fires": "tsx scripts/cluster-fires.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.127.0",

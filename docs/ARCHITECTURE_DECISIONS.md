@@ -7,7 +7,7 @@ across Western North America, using five real-time data feeds.
 technical decision, the alternatives that were considered, and the reasoning that
 selected one over the others. It is maintained continuously as the build proceeds.
 
-**Status:** Live document. Last updated at end of **Step 6** (GitHub Actions cron, verified in CI).
+**Status:** Live document. Last updated at end of **Step 7** (fire clustering).
 
 ---
 
@@ -834,6 +834,109 @@ the single largest line item and the seed's value is concentrated where sensors
 existed); reduce seed scope to Oregon and Washington, where the record readings
 occurred.
 
+### 3r. Fire clustering — parameters from measurement, identity from membership
+
+7,431 detections are not 7,431 fires: the busiest H3 cell alone holds 1,577
+detections of one complex. Clustering gives the agent entities it can name,
+track and compare over time.
+
+#### Parameters were measured, not guessed
+
+Nearest-neighbour distance between detections: **p50 84 m, p90 376 m, then p99
+jumps to 28 km.** Detections pack far tighter than the 375 m pixel because
+three satellites across multiple overpasses report the same fire at slightly
+offset coordinates; the gap between ~400 m and ~28 km is where fires separate.
+
+DBSCAN proved insensitive across that gap — 545 clusters at eps=750 m versus
+427 at eps=5000 m, a 6.7× parameter change moving the answer by 22%. That
+insensitivity *is* the evidence that the groups are real rather than an
+artifact of the threshold.
+
+**Chosen: eps 1500 m, minpoints 2**, in EPSG:5070 so eps is true metres —
+degrees would be anisotropic across 31–60N, where a longitude degree shrinks
+from ~95 km to ~62 km. minpoints=2 keeps small fires as real entities and
+qualifies them by confidence rather than discarding them; minpoints=4 was
+rejected because it pushes ~9% of detections into noise, including genuine
+small fires only a couple of overpasses caught.
+
+**Chosen: 48 h temporal split.** The maximum gap observed *within* a
+continuously burning fire is 14–24 h — satellite overpass spacing and cloud
+cover, not extinction. 48 h clears that, so no fire is fragmented by a cloudy
+day, while a genuine re-ignition after two days' silence becomes a separate
+fire.
+
+#### Identity through membership, not geometry
+
+Fuzzy spatial matching between runs is the obvious approach and the fragile
+one. But **detections are immutable rows with stable ids**, so "which cluster
+did this detection belong to last run" is an *exact lookup*. Clustering is
+therefore recomputed freely and identity inherited through detection overlap:
+
+| Prior clusters sharing detections | Action |
+|---|---|
+| 0 | new key, derived from the earliest detection's `observation_key` |
+| 1 | inherit that key |
+| 2+ | **merge** — survivor is the largest contributor, ties to the older fire |
+
+A merge is recorded in `fire_cluster_merges`, not hidden: two fires growing
+into one another is exactly the kind of change the timeline should show, and if
+the agent named a fire yesterday it must be able to explain where that name
+went. `resolve_cluster_key()` follows merge chains so a stale key still
+resolves.
+
+| Alternative | Why rejected |
+|---|---|
+| **Incremental assignment, never recluster** | Cheapest, ids never change. Rejected because clusters chain outward over time and absorb neighbours, and an early bad grouping can never be corrected. |
+| **Deterministic key from H3 cell + time bucket** | Perfectly stable with no matching logic. Rejected because arbitrary cell boundaries would split any fire straddling one, reporting a single fire as two. |
+
+**Verified:** an immediate re-run reported `created=0 inherited=617 merged=0` —
+every identity preserved.
+
+#### FIRMS detects industrial heat as fire
+
+A persistence analysis surfaced clusters burning continuously for a week at a
+fixed ~500 m footprint with steady intensity. Checked against known locations,
+they are **refineries and industrial plants**: the Athabasca oil sands
+(57.0, −111.5), four separate gas-flaring sites around Grande Prairie, Alberta
+(54.86–54.97, −118.3 to −118.5), Ferndale WA's refineries, Seattle's Duwamish,
+Victorville's cement plants, a Utah power station.
+
+**FRP variability separates them cleanly, because the physics differ** — a
+wildfire's intensity swings as it consumes fuel and the weather shifts, a flare
+burns steadily:
+
+| | Footprint spread | FRP CV |
+|---|---|---|
+| Wildfires | 1,458–4,799 m | **0.63–2.60** |
+| Industrial | 291–610 m | **0.30–0.37** |
+
+**Chosen: flag, do not exclude.** A refinery is a real emission source — a
+station downwind of Ferndale genuinely reads elevated PM, and excluding the
+source would leave that reading with no attributable cause. What matters is
+that the agent never calls it a wildfire. `source_character` is
+`likely_wildfire` (88 clusters, 84% of total FRP), `likely_industrial` (34), or
+`indeterminate` (495, fewer than 10 detections — too sparse to characterise
+either way, and saying so beats guessing).
+
+#### Labels: honest coverage over broad coverage
+
+NWS zone names read like a person's description of a place — the headline fire
+is labelled **"Yosemite NP outside of the valley"** — which is what makes them
+useful and equally why attaching the wrong one matters.
+
+The first heuristic took the nearest zone within 60 km. Measured, it named a
+**neighbouring** zone rather than the containing one **223 times out of 358**,
+including 18 clusters in Mexico and 6 in Canada carrying US place names.
+"Imperial" for a fire 30 km inside Baja California is precisely the kind of
+statement the agent would cite and be wrong about.
+
+**Chosen: label only where the centroid lies inside the zone.** Coverage drops
+to 135 of 617 and every label is a true statement; the remainder are described
+by coordinates and region. Coverage is bounded not by the rule but by the
+cache: only 429 zones are stored, being those an alert happened to reference.
+Pre-loading all ~1,550 zones would raise coverage at roughly 20 MB — declined
+for now against a storage budget already at 267 MB with the 2020 seed pending.
+
 ## Decision 4 — Storage and hosting
 
 Candidate infrastructure was verified against current pricing and feature documentation
@@ -1353,6 +1456,10 @@ the first route or component is written.
 | 3o | PM10 | Retain, but treat dust discrimination as station-specific | Assume the ratio is generally available |
 | 3p | CAMS grid | Add H3 r3 grid for CAMS once requests proved cheap | Stations only |
 | 3q | Forecast rows | Ingest 48h forecast; superseded by analysis bitemporally | History only |
+| 3r | Clustering | DBSCAN eps 1500 m / minpts 2 / 48 h split | minpts 4 (discards 9% as noise) |
+| 3s | Cluster identity | Inherit via exact detection membership | Incremental assignment; H3+time key |
+| 3t | Industrial sources | Flag via FRP variability, do not exclude | Treat as ordinary fires |
+| 3u | Cluster labels | Containing zone only (135 correct) | Nearest zone (223 of 358 wrong) |
 | 4a | Store | Neon Postgres + PostGIS | ClickHouse Cloud (no durable free tier) |
 | 4e | Storage headroom | 267/500 MB; narrow the seed first if pressed | Cut a graded deliverable |
 | 4f | Cron + repo visibility | Public repo, per-feed Actions cadences | Private with 2h polling (~1,260 min/month) |

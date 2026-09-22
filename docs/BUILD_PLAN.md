@@ -18,8 +18,8 @@ interactive replay timeline, deployed publicly.
 | 4 | OpenAQ stations and measurements | **done** |
 | 5 | Open-Meteo wind + CAMS model AQ | **done** |
 | 6 | GitHub Actions cron | **done** — 5 workflows, 173 runs/day, all paths tested |
-| 7 | Fire clustering | next |
-| 8 | Smoke attribution | |
+| 7 | Fire clustering | **done** — 617 clusters, identity verified stable |
+| 8 | Smoke attribution | next |
 | 9 | `hourly_frames` rollup | |
 | 10 | September 2020 seed backfill | |
 | 11 | Query layer — the nine agent tools | |
