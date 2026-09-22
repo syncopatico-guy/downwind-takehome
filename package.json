@@ -17,7 +17,10 @@
     "attribute:smoke": "tsx scripts/attribute-smoke.ts",
     "build:frames": "tsx scripts/build-frames.ts",
     "verify:tools": "tsx scripts/verify-tools.ts",
-    "ask": "tsx scripts/ask.ts"
+    "ask": "tsx scripts/ask.ts",
+    "copy:maplibre": "tsx scripts/copy-maplibre-worker.ts",
+    "predev": "npm run copy:maplibre",
+    "prebuild": "npm run copy:maplibre"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.127.0",

@@ -65,7 +65,16 @@ export default function MapView({ data, focus, onSelect }: Props) {
       if (!container.current || map.current) return;
       try {
         // MapLibre 6 ships named exports, not a default.
-        const { Map: MapLibre, NavigationControl } = await import('maplibre-gl');
+        const { Map: MapLibre, NavigationControl, setWorkerUrl } =
+          await import('maplibre-gl');
+
+        // Point MapLibre at a worker we serve ourselves (copied into public/
+        // by scripts/copy-maplibre-worker.ts). Its bundled worker module did
+        // not resolve under Next 16 -- the dev server answered with an HTML
+        // 404 and the browser refused it on MIME type. Without a worker no
+        // source is ever parsed, so every layer exists and every one is
+        // empty, while the map stays interactive and paints nothing.
+        setWorkerUrl('/maplibre/maplibre-gl-worker.mjs');
         if (cancelled || !container.current) return;
 
         const m = new MapLibre({

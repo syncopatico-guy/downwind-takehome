@@ -30,6 +30,13 @@ export default function DownwindApp() {
   const [focus, setFocus] = useState<MapFocus | null>(null);
   const [cited, setCited] = useState<string | null>(null);
   const [loadingMap, setLoadingMap] = useState(true);
+  /**
+   * Below the docked-panel breakpoint the chat becomes an overlay rather than
+   * disappearing. It was `hidden lg:block`, which removed the natural-language
+   * interface entirely on a narrow window -- the map still worked, so nothing
+   * looked broken, and the main thing the product does was simply absent.
+   */
+  const [chatOpen, setChatOpen] = useState(false);
 
   // The timeline is fetched once: 193 hourly frames is 58 KB, and refetching
   // it per scrub would be the network cost the whole design is avoiding.
@@ -74,6 +81,10 @@ export default function DownwindApp() {
       // An answer about a past moment moves the clock too, so the map and the
       // prose never describe different times.
       if (f.at) { setAt(f.at); setPinnedToNow(false); }
+      // Deliberately NOT closing the overlay here. It was closed so the map
+      // the answer just moved would be visible -- which meant the answer
+      // itself scrolled away the moment it arrived. The answer is the point;
+      // the map is context, and it is still there when the panel is dismissed.
     }
   }, []);
 
@@ -102,9 +113,40 @@ export default function DownwindApp() {
           {cited && <EvidenceDrawer recordId={cited} onClose={() => setCited(null)} />}
         </div>
 
-        <aside className="hidden w-[400px] shrink-0 border-l border-slate-800 lg:block">
+        {/*
+          ONE Chat instance, repositioned by CSS rather than rendered twice.
+          Two instances each kept their own conversation, so opening the
+          overlay after asking in the docked panel showed the example
+          questions again and the answer appeared lost. `hidden` is display:
+          none -- the component stays mounted and keeps its state.
+        */}
+        {chatOpen && (
+          <button
+            aria-label="Close chat"
+            onClick={() => setChatOpen(false)}
+            className="absolute inset-0 z-20 bg-slate-950/60 lg:hidden"
+          />
+        )}
+        <aside
+          className={
+            'border-l border-slate-800 ' +
+            'lg:static lg:z-auto lg:block lg:w-[400px] lg:shrink-0 ' +
+            (chatOpen
+              ? 'absolute inset-y-0 right-0 z-30 w-full max-w-[420px]'
+              : 'hidden')
+          }
+        >
           <Chat at={at} pinnedToNow={pinnedToNow} onAnswer={onAnswer} onCite={setCited} />
         </aside>
+
+        {!chatOpen && (
+          <button
+            onClick={() => setChatOpen(true)}
+            className="absolute bottom-4 right-4 z-20 rounded-full bg-sky-700 px-4 py-2.5 text-xs font-medium text-white shadow-lg hover:bg-sky-600 lg:hidden"
+          >
+            Ask a question
+          </button>
+        )}
       </div>
 
       <Timeline
