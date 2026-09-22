@@ -28,7 +28,7 @@ the way they are) and `BUILD_PLAN.md` (what's done and what's next).
 
 ---
 
-## Status: Steps 1–9 done · Step 10 **deliberately skipped** · Step 11 **in progress**
+## Status: Steps 1–11 done · Step 10 **deliberately skipped** · next is **Step 12**
 
 | Step | State |
 |---|---|
@@ -42,8 +42,8 @@ the way they are) and `BUILD_PLAN.md` (what's done and what's next).
 | 8 Smoke attribution | done — 1,270 attributions |
 | 9 `hourly_frames` | done — 165k frames |
 | **10 Sept 2020 seed** | **SKIPPED** — see below |
-| **11 Query layer (9 tools)** | **IN PROGRESS** — see below |
-| 12 The agent | |
+| **11 Query layer (9 tools)** | **done** — 73 verification checks passing |
+| 12 The agent | **NEXT — blocked on `ANTHROPIC_API_KEY`** |
 | 14 Interface (13 folded in) | |
 | 15 Deploy | |
 | 16 Golden-question eval set | stretch, first to cut |
@@ -194,32 +194,27 @@ Most accept `--dry-run` and `--budget=<minutes>`. Migrations are numbered
 
 ---
 
-## Step 11 — the nine tools (in progress)
+## Step 11 — the nine tools (done)
 
-### Built and verified against live data
+`npm run verify:tools` — 73 behavioural checks against live data, all passing.
+Re-run it after any schema change or deploy.
 
-| File | State |
+| File | |
 |---|---|
-| `lib/tools/envelope.ts` | done — envelope, record ids, `computed: false` discipline |
-| `lib/tools/time.ts` | done — both clocks, one place |
-| `lib/tools/sql.ts` | done — Neon serverless driver, cached source registry |
-| `lib/tools/types.ts` | done — `ToolDefinition` shape |
-| `lib/tools/place.ts` | done — gazetteer + conservative cell labelling |
-| `lib/tools/get-data-health.ts` | **done, verified** — 5 sources, 200 ms |
-| `lib/tools/resolve-place.ts` | done — ambiguity surfaced, not resolved |
-| `get_air_quality` | next |
-| `get_fires` / `get_wind` / `get_alerts` | not started |
-| `explain_smoke` | not started |
-| `compare_time` / `rank_places` | not started |
-| `registry.ts` | not started |
-| `app/api/tools/[tool]/route.ts` | not started |
-| `scripts/verify-tools.ts` | not started |
+| `lib/tools/envelope.ts` | envelope, record ids, the `computed: false` discipline |
+| `lib/tools/time.ts` | both clocks, resolved in one place |
+| `lib/tools/sql.ts` | Neon serverless driver, cached source registry |
+| `lib/tools/place.ts` | gazetteer + containment-only cell labelling (24% named) |
+| `lib/tools/registry.ts` | name → tool; Anthropic definitions via `z.toJSONSchema` |
+| `lib/tools/*.ts` | the nine tools |
+| `app/api/tools/route.ts` | GET: the whole surface |
+| `app/api/tools/[tool]/route.ts` | GET schema, POST invoke |
+| `scripts/verify-tools.ts` | the check suite |
 
-**This work is uncommitted** — `lib/tools/` is untracked.
-
-Build order for the rest: the four readers, then `explain_smoke`, then
-`compare_time`/`rank_places`, then the registry and route, then the
-verification script.
+**For Step 12:** `anthropicToolDefinitions()` returns `{name, description,
+input_schema}` ready to pass to the SDK, and `invokeTool(name, input)`
+validates with the same Zod schema before running. Do not hand-write JSON
+Schema anywhere.
 
 ### The contract
 

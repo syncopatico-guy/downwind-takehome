@@ -1837,6 +1837,58 @@ found and fixed immediately: cell labelling first ran the same containment
 search three times per cell and took 2.0 s over 1,111 cells; one `LATERAL`
 gives the same answer in 744 ms.
 
+#### Ambiguity has to be detected before the result is truncated
+
+Caught by exercising the HTTP surface rather than the function. `resolve_place`
+checked for distant namesakes across the rows it was about to return, so
+`{"query": "Vancouver", "limit": 2}` reported **no ambiguity** — an exact
+station-name match in BC ranked first, Portland-Vancouver-Beaverton second, and
+the third candidate fell outside the cut. A low limit could silently disable
+the one behaviour the tool exists for.
+
+Two changes. Ambiguity is now assessed over a wider scan (10 candidates) and
+the result truncated afterwards, with the caveat saying when a rival is not in
+the returned rows. And the rival test moved from "within 0.2 of the top score"
+to "any genuine name match" — the original window missed Vancouver BC at 0.91
+against Portland-Vancouver-Beaverton at 0.64, because that gap is an artefact
+of exact-versus-substring matching rather than evidence about what was meant.
+
+The looser rule was checked for over-firing: Vancouver and Sierra flag,
+Portland, Yosemite, Seattle and Missoula do not.
+
+#### Verification
+
+`npm run verify:tools` exercises all nine against live data and asserts
+behaviour rather than row counts, which would rot within the day. **73 checks,
+0 failures.** The ones worth naming:
+
+| Assertion | Why it is there |
+|---|---|
+| "nothing explains this" is returned as a result | 126 unexplained of 150 — the majority case, and the system's most important answer |
+| both conflict types fire on the 985 µg/m³ monitor | the pair adjudicates where neither alone can |
+| uncomputed quality is `null`, not `[]` | an empty array is a claim |
+| derived tools report the knowledge cutoff as unapplied | rather than accepting the parameter and ignoring it |
+| a metric missing on one side yields a null delta | absence is not a change to zero |
+| aggregated wind rows carry no record id | they are computed, not stored, so they are not citable |
+| `at` + `from` together is rejected | silently preferring one would never surface |
+| an unresolvable place is an answer, not an error | with a caveat against substituting a nearby name |
+
+#### Performance, after four fixes
+
+| Call | Before | After |
+|---|---|---|
+| `get_air_quality`, region-wide 7 days | 10,051 ms | 460 ms |
+| `get_alerts`, full retained window | 5,047 ms | 239 ms |
+| `get_alerts` with a bbox | 7,898 ms | 1,045 ms |
+| `explain_smoke`, 7 days | 2,413 ms | 643 ms |
+
+Every one was a case of doing expensive work before the filter that would have
+discarded it — a LATERAL evaluated across the whole window because the LIMIT
+sat outside it, a view column whose mere selection forced a correlated
+`ST_Union` per row, a spatial test applied after geometry resolution instead of
+against the indexed base tables, and a percentile computed for all 1,099
+stations when one city was asked about.
+
 #### Citations
 
 Every returned row carries a `record_id` shaped `<entity>:<primary key>` --

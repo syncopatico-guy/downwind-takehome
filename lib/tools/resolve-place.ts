@@ -20,6 +20,20 @@ const inputSchema = z.object({
 /** Two candidates this far apart are different places, not a fuzzy one. */
 const AMBIGUITY_KM = 100;
 
+/**
+ * A rival only needs to be a real name match, not a close scorer.
+ *
+ * The first rule required a rival within 0.2 of the top score, and it missed
+ * the case it was written for: "Vancouver" matches a station named exactly
+ * "Vancouver" in BC at 0.91 and Portland-Vancouver-Beaverton at 0.64, so the
+ * rival fell outside the window and no ambiguity was reported for two places
+ * 395 km apart. That score gap is an artefact of exact-versus-substring
+ * matching, not evidence about which the user meant. 0.5 is the base score for
+ * a substring match, so this admits any genuine name match and errs toward
+ * flagging -- the safer direction for a tool whose job is not to pick silently.
+ */
+const AMBIGUITY_MIN_CONFIDENCE = 0.5;
+
 function haversineKm(a: PlaceCandidate, b: PlaceCandidate): number {
   const R = 6371;
   const toRad = (d: number) => (d * Math.PI) / 180;
@@ -34,7 +48,15 @@ function haversineKm(a: PlaceCandidate, b: PlaceCandidate): number {
 async function handler(input: z.infer<typeof inputSchema>): Promise<Envelope<PlaceCandidate>> {
   const limit = input.limit ?? 5;
   const now = new Date();
-  const candidates = await resolvePlaceCandidates(input.query, limit);
+
+  // Ambiguity is detected over a WIDER set than is returned, then the result is
+  // truncated. Checking the truncated list meant a low limit could hide the
+  // very thing this tool exists to surface: "Vancouver" with limit 2 returned
+  // an exact station-name match plus one rival and reported no ambiguity, while
+  // Vancouver BC sat just outside the cut, 420 km away.
+  const AMBIGUITY_SCAN = 10;
+  const scanned = await resolvePlaceCandidates(input.query, Math.max(limit, AMBIGUITY_SCAN));
+  const candidates = scanned.slice(0, limit);
 
   const caveats: string[] = [
     'Places are resolved only against data we hold: NWS zone names, air-quality ' +
@@ -48,16 +70,22 @@ async function handler(input: z.infer<typeof inputSchema>): Promise<Envelope<Pla
         'named place: say the location could not be resolved.',
     );
   } else {
-    const [top] = candidates;
-    const rivals = candidates
+    const [top] = scanned;
+    const rivals = scanned
       .slice(1)
-      .filter((c) => haversineKm(top, c) > AMBIGUITY_KM && c.confidence >= top.confidence - 0.2);
+      .filter((c) => haversineKm(top, c) > AMBIGUITY_KM
+                   && c.confidence >= AMBIGUITY_MIN_CONFIDENCE);
     if (rivals.length > 0) {
+      const hidden = rivals.filter((r) => !candidates.some((c) => c.record_id === r.record_id));
       caveats.push(
         `"${input.query}" is ambiguous: ${[top, ...rivals]
           .map((c) => `${c.name} (${c.lat.toFixed(2)}, ${c.lon.toFixed(2)})`)
           .join(' and ')} are more than ${AMBIGUITY_KM} km apart. State which one you used, ` +
-          'or ask which was meant.',
+          'or ask which was meant.' +
+          (hidden.length > 0
+            ? ` ${hidden.length} of these fall outside the requested limit and are not in ` +
+              'the returned rows — raise limit to see them.'
+            : ''),
       );
     }
     if (top.station_count === 0) {

@@ -22,12 +22,24 @@ interactive replay timeline, deployed publicly.
 | 8 | Smoke attribution | **done** — 1,270 attributions, 20.9% of elevated hours explained |
 | 9 | `hourly_frames` rollup | **done** — 165k frames, 28 MB |
 | 10 | September 2020 seed backfill | **skipped deliberately** — live data has a real attributable event |
-| 11 | Query layer — the nine agent tools | **in progress** — envelope, time, sql, place, `get_data_health`, `resolve_place` done |
-| 12 | The agent | |
+| 11 | Query layer — the nine agent tools | **done** — 9 tools, registry, HTTP routes, 73 verification checks passing |
+| 12 | The agent | **next** — blocked on `ANTHROPIC_API_KEY` |
 | 13 | Parquet export + DuckDB-WASM scrub | |
 | 14 | Interface | |
 | 15 | Deploy | |
 | 16 | Golden-question eval set | stretch |
+
+**Verified state after Step 11:** nine tools in `lib/tools/`, each returning
+the provenance envelope; `npm run verify:tools` runs 73 behavioural checks
+against live data, all passing. HTTP surface at `/api/tools` and
+`/api/tools/:tool`. Tool inputs are Zod schemas, and the Anthropic tool
+definitions are derived from them via `z.toJSONSchema`, so the schema the model
+sees and the schema that validates the call cannot drift.
+
+**Open before Step 14:** no workflow rebuilds the derived layer
+(`cluster:fires`, `attribute:smoke`, `build:frames` are manual-only), so
+`hourly_frames` sits ~12 hours behind raw measurements and the timeline would
+lag the map.
 
 **Verified state after Step 4:** 7,431 fire detections over 8 days; 890 alerts,
 all with resolvable geometry; 429 zones cached; 134,652 AQ measurements across
