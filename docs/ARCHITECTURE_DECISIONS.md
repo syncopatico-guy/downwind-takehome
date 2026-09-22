@@ -7,7 +7,7 @@ across Western North America, using five real-time data feeds.
 technical decision, the alternatives that were considered, and the reasoning that
 selected one over the others. It is maintained continuously as the build proceeds.
 
-**Status:** Live document. Last updated at end of **Step 6** (GitHub Actions cron).
+**Status:** Live document. Last updated at end of **Step 6** (GitHub Actions cron, verified in CI).
 
 ---
 
@@ -991,6 +991,72 @@ first emitted as a plain YAML scalar, which folds newlines — so the three
 parsing the generated files with a real YAML parser rather than reading them.
 Fixed with a literal block scalar (`run: |`).
 
+### 4g. Freshness is measured over recurring runs only
+
+The first CI cron run succeeded and wrote to the database — and immediately
+exposed a flaw in the health model. Both `nws_alerts` and `openaq` reported
+**stale minutes after succeeding.**
+
+**Cause:** the pessimistic rollup from 3f ("a source is only as fresh as its
+weakest variant") treated one-off maintenance passes as if they were
+continuously-refreshed feeds:
+
+| Variant | What it is |
+|---|---|
+| `nws_alerts / zone_geometry` | the `--resolve-zones` repair pass |
+| `openaq / backfill:7d` | the historical backfill |
+
+Each ran once, correctly, and will never run again — so each was permanently
+stale and dragged its whole source down with it.
+
+The pessimism itself is right, and stays: if one of three VIIRS satellites
+stops publishing, that must surface. The error was the population it was
+computed over.
+
+**Fix:** `cadence_seconds` is a claim about the **cron** schedule, so freshness
+is now measured against cron runs only. The health model distinguishes four
+genuinely different states rather than collapsing them:
+
+| State | Meaning |
+|---|---|
+| `fresh` | a scheduled run succeeded within the staleness threshold |
+| `stale` | scheduled runs exist, but the most recent success is overdue |
+| `one_off` / `not_scheduled` | never ran on a schedule — maintenance history, excluded from the rollup |
+| `never_succeeded` | scheduled, but no successful run yet |
+
+`last_ok_any_at` still reports the most recent success of any kind, because
+provenance wants the full picture even where freshness does not. "We have never
+scheduled this" and "this is overdue" are different facts, and the agent has to
+be able to say which one it means.
+
+**An implementation note worth keeping:** the migration initially failed with
+`cannot change name of view column "last_attempt_at" to "last_ok_any_at"` —
+`CREATE OR REPLACE VIEW` cannot reorder or rename columns, and the new revision
+inserted a column mid-list. Fixed with explicit `DROP VIEW` in dependency
+order. The failure cost nothing because the migration runner wraps each file in
+its own transaction, so it rolled back unrecorded and re-ran after the fix.
+
+### 4h. CI verification of the pipeline
+
+The first `workflow_dispatch` run failed with HTTP 400: `/alerts/active`
+rejects the `limit` parameter that `/alerts` requires.
+
+**Why it escaped local testing, which is the more useful lesson:** every local
+run had used `--days=N`, the *backfill* path through `/alerts`. The active path
+— the one the cron executes 96 times a day — had never been exercised. I had
+thoroughly validated the code I was iterating on and shipped the scheduled path
+untested.
+
+**Corrective practice adopted:** extract the exact command from each workflow
+file and run *that*, rather than an approximation. Doing so immediately found
+that FIRMS `--window=24h` had also only ever been dry-run (it works — 288 new
+detections, rest deduped), and disproved the `past_days=1` rate-limit claim
+recorded in 3p.
+
+**Verified end to end:** run #2 succeeded, and `ingest_runs` row 41 records
+`trigger_kind=cron, status=ok, rows_inserted=1`. GitHub Actions → repository
+secrets → ingester → Neon is a working path.
+
 ## Decision 5 — The agent
 
 ### Governing principle: the model never performs arithmetic
@@ -1290,6 +1356,7 @@ the first route or component is written.
 | 4a | Store | Neon Postgres + PostGIS | ClickHouse Cloud (no durable free tier) |
 | 4e | Storage headroom | 267/500 MB; narrow the seed first if pressed | Cut a graded deliverable |
 | 4f | Cron + repo visibility | Public repo, per-feed Actions cadences | Private with 2h polling (~1,260 min/month) |
+| 4g | Freshness population | Measure over cron runs only; one-offs excluded | Count every run (produced false staleness) |
 | 4d | DB drivers | `pg` for scripts, `@neondatabase/serverless` for routes | One driver everywhere |
 | 4b | Ingestion trigger | GitHub Actions cron | Vercel Cron (daily-only on Hobby) |
 | 4c | New technology | DuckDB-WASM + Parquet, client-side scrub | Self-hosted ClickHouse |
