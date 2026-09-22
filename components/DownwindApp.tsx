@@ -139,10 +139,16 @@ export default function DownwindApp() {
           <Chat at={at} pinnedToNow={pinnedToNow} onAnswer={onAnswer} onCite={setCited} />
         </aside>
 
+        {/*
+          min-h-[44px] is not decoration: below `lg` this button is the ONLY
+          route into the chat, so the entire natural-language interface sat
+          behind a 36px-tall target on exactly the devices that need a big one.
+          Measured before the change: 111 x 36.
+        */}
         {!chatOpen && (
           <button
             onClick={() => setChatOpen(true)}
-            className="absolute bottom-4 right-4 z-20 rounded-full bg-sky-700 px-4 py-2.5 text-xs font-medium text-white shadow-lg hover:bg-sky-600 lg:hidden"
+            className="absolute bottom-4 right-4 z-20 inline-flex min-h-[44px] items-center rounded-full bg-sky-700 px-5 text-xs font-medium text-white shadow-lg hover:bg-sky-600 lg:hidden"
           >
             Ask a question
           </button>

@@ -27,3 +27,19 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* MapLibre's navigation control ships at 29x29, below the 44px minimum for a
+   touch target -- and on a phone these are the only way to change zoom, since
+   pinch competes with the page. Enlarged here rather than by replacing the
+   control, because the control is otherwise correct: it is keyboard
+   focusable and already carries "Zoom in"/"Zoom out" labels. */
+.maplibregl-ctrl-group button {
+  width: 44px;
+  height: 44px;
+}
+
+/* The control draws its icons via background-image at the old 29px box, so
+   they must be re-centred in the larger button or they sit up and to the left. */
+.maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  background-position: center;
+}

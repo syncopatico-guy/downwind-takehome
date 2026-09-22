@@ -110,6 +110,36 @@ export default function Timeline({ frames, at, pinnedToNow, onScrub, onPinNow }:
     if (e.buttons === 1) scrubTo(e.clientX);
   };
 
+  /**
+   * Keyboard scrubbing, by frame rather than by pixel.
+   *
+   * The pointer path snaps to the nearest real frame, so the keyboard path
+   * moves between frames directly -- which makes arrow keys strictly more
+   * precise than dragging, not a degraded substitute for it.
+   */
+  const stepBy = useCallback((delta: number) => {
+    if (frames.length === 0) return;
+    const next = Math.min(frames.length - 1, Math.max(0, index + delta));
+    if (next !== index) onScrub(frames[next].t);
+  }, [frames, index, onScrub]);
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (frames.length === 0) return;
+    // A day either way, for a series that is hours long and days wide.
+    const page = 24;
+    const moves: Record<string, number> = {
+      ArrowLeft: -1, ArrowRight: 1, ArrowDown: -1, ArrowUp: 1,
+      PageDown: -page, PageUp: page,
+    };
+    if (e.key in moves) {
+      e.preventDefault();
+      stepBy(moves[e.key]);
+      return;
+    }
+    if (e.key === 'Home') { e.preventDefault(); onScrub(frames[0].t); return; }
+    if (e.key === 'End') { e.preventDefault(); onScrub(frames[frames.length - 1].t); }
+  };
+
   const frame = frames[index];
   const pct = paths && span && frames.length > 0
     ? ((new Date(frames[index].t).getTime() - span.t0) / Math.max(span.t1 - span.t0, 1)) * 100
@@ -124,7 +154,13 @@ export default function Timeline({ frames, at, pinnedToNow, onScrub, onPinNow }:
           </span>
           {pinnedToNow
             ? <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-300">live</span>
-            : <button onClick={onPinNow} className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-300 hover:bg-slate-700">
+            : <button
+                onClick={onPinNow}
+                // ~20px tall before this: the control that undoes scrubbing was
+                // the hardest thing on the strip to hit. Full touch size on
+                // small screens, compact again where there is a pointer.
+                className="inline-flex min-h-[44px] items-center rounded bg-slate-800 px-3 text-slate-300 hover:bg-slate-700 sm:min-h-0 sm:px-1.5 sm:py-0.5"
+              >
                 back to now
               </button>}
           {frame && frame.partial_cells > 0 && (
@@ -148,11 +184,37 @@ export default function Timeline({ frames, at, pinnedToNow, onScrub, onPinNow }:
         </div>
       </div>
 
+      {/*
+        A slider, declared as one. It was a bare div with pointer handlers,
+        which failed twice over: no tab stop and no key handling made replay --
+        a stated requirement -- unreachable by keyboard entirely, and the
+        default `touch-action` let the browser claim a horizontal drag for
+        panning before pointermove ever fired, so the gesture was unreliable on
+        exactly the devices that only have gestures.
+
+        `touch-action: none` is what makes the drag ours on a touch screen.
+      */}
       <div
         ref={ref}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
-        className="relative h-[68px] cursor-ew-resize rounded bg-slate-900/60"
+        onKeyDown={onKeyDown}
+        tabIndex={0}
+        role="slider"
+        aria-label="Replay timeline — arrow keys move one hour, Page Up and Page Down move one day"
+        aria-valuemin={0}
+        aria-valuemax={Math.max(frames.length - 1, 0)}
+        aria-valuenow={index}
+        aria-valuetext={
+          frame
+            ? `${new Date(frame.t).toUTCString().replace(' GMT', ' UTC')} — ` +
+              `median ${frame.pm25_p50 ?? 'no data'}, ${frame.fires} fires`
+            : 'no data'
+        }
+        style={{ touchAction: 'none' }}
+        className="relative h-[68px] cursor-ew-resize rounded bg-slate-900/60
+                   focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400
+                   focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
       >
         {paths && (
           <svg viewBox={`0 0 100 ${H}`} preserveAspectRatio="none" className="h-full w-full">
