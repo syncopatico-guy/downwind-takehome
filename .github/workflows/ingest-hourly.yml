@@ -34,10 +34,11 @@ jobs:
           OPENAQ_API_KEY: ${{ secrets.OPENAQ_API_KEY }}
           NWS_USER_AGENT: ${{ secrets.NWS_USER_AGENT }}
         run: |
-          # Open-Meteo weights requests by COST, not count: a 429 landed after
-          # only 3 large calls during the 7-day backfill. The hourly run asks
-          # for past_days=1, which cuts the weight roughly fourfold. Deeper
-          # history is a one-off backfill, not something a cron repeats.
+          # past_days=1 keeps the hourly run cheap in rows and bandwidth --
+          # deeper history is a one-off backfill, not something a cron repeats.
+          # Note it does NOT avoid rate limiting: measured, a 429 still lands
+          # after ~4 requests with past_days=1, so the limit tracks locations
+          # per request (or requests per minute), not the span requested.
           npm run ingest:openaq -- --mode=latest --trigger=cron --budget=10
           npm run ingest:openmeteo -- --mode=weather --trigger=cron --past-days=1 --forecast-days=2
           npm run ingest:openmeteo -- --mode=cams --trigger=cron --past-days=1 --forecast-days=2

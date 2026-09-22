@@ -114,7 +114,12 @@ async function main(): Promise<void> {
   if (days === null) {
     const now = new Date();
     windows.push({
-      url: `${NWS_BASE}/alerts/active?area=${NWS_AREAS}&limit=500`,
+      // NO `limit` here: /alerts/active rejects it with HTTP 400
+      // ("Query parameter \"limit\" is not recognized") -- unlike /alerts,
+      // which requires it. The active endpoint also returns no `pagination`
+      // key, delivering every active alert in one response (347 nationwide
+      // when checked), so paging is neither available nor needed.
+      url: `${NWS_BASE}/alerts/active?area=${NWS_AREAS}`,
       start: now, end: now, label: 'active',
     });
   } else {

@@ -758,9 +758,16 @@ Instrumenting it confirmed **a 429 after 3 requests**: Open-Meteo weights by
 request *cost*, and a 200-location, 7-variable, 9-day call consumes far more
 than one unit.
 
-**Consequence for the cron (Step 6): the hourly run must not request seven days
-of history every time.** `past_days=1` cuts the weight roughly fourfold; the
-seven-day pull is a one-off backfill.
+**Consequence for the cron (Step 6): the hourly run requests `past_days=1`,**
+so it stays cheap in rows and bandwidth; the seven-day pull is a one-off
+backfill.
+
+**A correction to that reasoning.** I first claimed `past_days=1` "cuts the
+request weight roughly fourfold". Measuring it disproved that: with
+`past_days=1`, a 429 still lands after ~4 requests, exactly as with
+`past_days=7`. The limit tracks **locations per request** (or simply requests
+per minute), not the time span requested. `past_days=1` is still right for the
+cron, but for a different reason than the one originally given.
 
 #### Forecast rows — the bitemporal design doing real work
 
@@ -956,9 +963,8 @@ choice rather than a budget artifact — alerts are issued sporadically, the
 staleness threshold is an hour, and polling a public government API four times
 faster for no gain in answer quality is not reasonable use.
 
-**Hourly Open-Meteo uses `past_days=1`, not 7.** The 429-after-3-requests
-finding (3p) means the deep history pull is a one-off backfill, never something
-a cron repeats.
+**Hourly Open-Meteo uses `past_days=1`, not 7** -- to keep rows and bandwidth
+down, not to dodge rate limiting, which it does not (see the correction in 3p).
 
 Three operational details worth stating: every workflow declares a
 `concurrency` group so a slow run cannot overlap the next tick and race on the
