@@ -15,8 +15,8 @@ interactive replay timeline, deployed publicly.
 | 1 | Config, database layer, migration runner | **done** |
 | 2 | FIRMS fire-detection ingester | **done** |
 | 3 | NWS alerts ingester + zone geometry | **done** |
-| 4 | OpenAQ stations and measurements | **ingestion done; backfill pending** |
-| 5 | Open-Meteo wind + CAMS model AQ | |
+| 4 | OpenAQ stations and measurements | **done** |
+| 5 | Open-Meteo wind + CAMS model AQ | next |
 | 6 | GitHub Actions cron | |
 | 7 | Fire clustering | |
 | 8 | Smoke attribution | |
@@ -29,10 +29,14 @@ interactive replay timeline, deployed publicly.
 | 15 | Deploy | |
 | 16 | Golden-question eval set | stretch |
 
-**Verified state:** 7,431 fire detections over 8 days; 890 alerts, all with
-resolvable geometry; 429 zones cached; 3,317 AQ stations known with 800
-selected covering 438 H3 r4 cells. Database 40 MB of a 500 MB ceiling. Three
-of five feeds live.
+**Verified state after Step 4:** 7,431 fire detections over 8 days; 890 alerts,
+all with resolvable geometry; 429 zones cached; 134,652 AQ measurements across
+1,193 stations, with 434–438 H3 r4 cells covered on every day of the seven-day
+window. Database **106 MB** of a 500 MB ceiling. Three of five feeds live.
+
+**Storage watch:** Step 5 adds `weather_hourly` and `model_aq_hourly` at ~800
+sample points (~134k rows each, ~60 MB). That puts the running total near
+170 MB before the 2020 seed, attribution table and frames.
 
 ---
 

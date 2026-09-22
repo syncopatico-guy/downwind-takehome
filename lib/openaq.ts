@@ -322,12 +322,23 @@ export interface HourlyReading {
   hasFlags: boolean | null;
 }
 
-/** Hourly history for one sensor. One request covers the whole range. */
+/**
+ * Hourly history for one sensor. One request covers the whole range.
+ *
+ * `endpoint` exists because the two are not interchangeable across sensors:
+ * `/hours` serves a precomputed hourly ROLLUP, and that rollup was never
+ * computed for the sensors behind stations we had to synthesize -- it returns
+ * `found: 0` for them even though OpenAQ reports tens of thousands of
+ * observations and a reading minutes old. `/measurements` serves the raw
+ * readings, which for these sensors arrive on the hour anyway (~165 per
+ * 7-day window, same as `/hours` yields elsewhere).
+ */
 export async function fetchSensorHours(
   sensorId: number, from: Date, to: Date,
+  endpoint: 'hours' | 'measurements' = 'hours',
 ): Promise<HourlyReading[]> {
   const body = await get<{ results?: Record<string, unknown>[] }>(
-    `/sensors/${sensorId}/hours`,
+    `/sensors/${sensorId}/${endpoint}`,
     {
       datetime_from: from.toISOString(),
       datetime_to: to.toISOString(),

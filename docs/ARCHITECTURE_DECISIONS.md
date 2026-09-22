@@ -7,7 +7,7 @@ across Western North America, using five real-time data feeds.
 technical decision, the alternatives that were considered, and the reasoning that
 selected one over the others. It is maintained continuously as the build proceeds.
 
-**Status:** Live document. Last updated during **Step 4** (OpenAQ ingester).
+**Status:** Live document. Last updated at end of **Step 4** (OpenAQ ingester, complete).
 
 ---
 
@@ -673,6 +673,61 @@ sensor across pages, and the value-hash dedupe absorbs them. That is the third
 time the append-only dedupe has caught upstream duplication, after the FIRMS
 regional overlap and OpenAQ's own repeats.
 
+### 3n. The hourly rollup that does not exist
+
+The backfill initially reported that **every synthesized station returned zero
+history** — 374 sensors attempted, none with data. Taken at face value that
+would have meant the +182 cells of coverage won by synthesis existed only
+going forward, with the 7-day replay window back at its original 253 cells.
+
+Probing one sensor directly contradicted its own API:
+
+| Query | Result |
+|---|---|
+| `/v3/sensors/377` metadata | `datetimeFirst` 2016-03-14, `datetimeLast` **2026-09-22T00:00Z**, 66,903 observations |
+| `/v3/sensors/377/hours` | **`found: 0`** |
+| `/v3/sensors/377/measurements` | **165 readings** across the same 7-day window |
+
+**Cause:** `/hours` serves a precomputed hourly *rollup*, and that rollup was
+never computed for these sensors. `/measurements` serves the raw readings —
+which, for these sensors, arrive on the hour anyway, giving the same ~165
+values per week that `/hours` yields elsewhere.
+
+**Fix:** choose the endpoint from `metadata_source` rather than discovering it
+per sensor. Synthesized stations go straight to `/measurements`, roster
+stations to `/hours`, with a fallback either way. An earlier version tried
+`/hours` first for everything and paid two requests per sensor to learn
+nothing; the informed version ran 319 sensors in 319 requests with the
+fallback never firing.
+
+**Verified result:** 991/991 sensors attempted (879 with data, 112 genuinely
+empty). 134,652 measurements across 1,193 stations. Daily H3 r4 cell coverage
+is **434–438 across the entire seven-day history** — uniform, not merely live.
+Synthesized stations contributed 65,558 rows across 359 stations, **49% of all
+measurements**.
+
+Median PM2.5 by tier came out close — low-cost 5.0, unknown 4.8, reference 5.6
+µg/m³ — which matters for the conflict story: with tiers agreeing in clean
+conditions, divergence during a smoke event is signal rather than baseline bias.
+
+### 3o. PM10 is largely non-reporting — a justification that did not survive
+
+PM10 was included in the storage budget because the PM10/PM2.5 ratio
+discriminates coarse blowing dust from fine combustion smoke, letting the agent
+say "that is dust, not smoke."
+
+Measured reality: of 239 PM10 sensors on selected stations, only **20 have any
+data** in the seven-day window; 209 are empty. In-bbox PM10 readings run ~220
+against ~2,100 for PM2.5.
+
+**The capability therefore exists at a small minority of stations rather than
+generally.** PM10 is retained — it costs little now that it is ingested, and
+where present the ratio is genuinely informative — but the agent must treat
+dust-versus-smoke discrimination as available only at specific stations, never
+as a claim it can make anywhere. Recorded because the justification given when
+the storage budget was chosen turned out to be much weaker in practice than in
+principle.
+
 ## Decision 4 — Storage and hosting
 
 Candidate infrastructure was verified against current pricing and feature documentation
@@ -1061,6 +1116,8 @@ the first route or component is written.
 | 3k | AQ station cap | 800, auditable SQL selection, round-robin r4 fill | Keep all ~2,000 live sensors |
 | 3l | Reference tier | Accept near-absence; tier becomes a stated caveat | Add AirNow as a sixth feed |
 | 3m | Roster gap | Synthesize from the bulk feed at zero API cost | Individual lookups (all 404) |
+| 3n | AQ history endpoint | Choose by metadata_source; /measurements for synthesized | Try /hours for all (2 req/sensor, 0 rows) |
+| 3o | PM10 | Retain, but treat dust discrimination as station-specific | Assume the ratio is generally available |
 | 4a | Store | Neon Postgres + PostGIS | ClickHouse Cloud (no durable free tier) |
 | 4d | DB drivers | `pg` for scripts, `@neondatabase/serverless` for routes | One driver everywhere |
 | 4b | Ingestion trigger | GitHub Actions cron | Vercel Cron (daily-only on Hobby) |

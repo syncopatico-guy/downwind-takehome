@@ -367,15 +367,39 @@ async function backfill(days: number, triggerKind: TriggerKind, dryRun: boolean)
   const to = new Date();
   const from = new Date(to.getTime() - days * 86_400_000);
 
-  const sensors = await query<{ sensor_id: string; station_id: string; parameter: string; units: string | null }>(
-    `SELECT sn.sensor_id::text, sn.station_id, sn.parameter, sn.units
-       FROM aq_sensors sn JOIN aq_stations s ON s.station_id = sn.station_id
-      WHERE s.selected ORDER BY s.instrument_tier, sn.sensor_id`);
+  // Self-resuming: skip sensors that already have coverage in this window.
+  // Two earlier long jobs died to interruptions, and an offset-based resume
+  // would silently drift if the sensor set changed between runs. Asking the
+  // data what is already present cannot drift.
+  // Resume on the recorded ATTEMPT, not on whether rows came back. Inferring
+  // it from results meant sensors with no data in the window were re-fetched
+  // on every run and could never converge. --force re-attempts everything.
+  const force = hasFlag('force');
+  const sensors = await query<{
+    sensor_id: string; station_id: string; parameter: string;
+    units: string | null; metadata_source: string;
+  }>(
+    `SELECT sn.sensor_id::text, sn.station_id, sn.parameter, sn.units, s.metadata_source
+       FROM aq_sensors sn
+       JOIN aq_stations s ON s.station_id = sn.station_id
+      WHERE s.selected
+        AND ($2::boolean OR sn.backfill_attempted_at IS NULL
+             OR sn.backfill_window_start > $1::timestamptz)
+      ORDER BY sn.backfill_attempted_at NULLS FIRST, s.instrument_tier, sn.sensor_id
+      LIMIT $3`,
+    [from, force, Number(arg('limit') ?? 100000)]);
+
+  const [{ total }] = await query<{ total: string }>(
+    `SELECT count(*)::text AS total FROM aq_sensors sn
+       JOIN aq_stations s ON s.station_id = sn.station_id WHERE s.selected`);
 
   console.log(
-    `  sensors=${sensors.length} window=${from.toISOString().slice(0,10)}..${to.toISOString().slice(0,10)}`);
-  console.log(`  estimated wall time at ~1 req/s: ~${Math.ceil(sensors.length / 57)} min`);
+    `  window=${from.toISOString().slice(0,10)}..${to.toISOString().slice(0,10)}  ` +
+    `sensors_remaining=${sensors.length} of ${total} selected ` +
+    `(already covered: ${Number(total) - sensors.length})`);
+  console.log(`  estimated wall time at ~54 req/min: ~${Math.ceil(sensors.length / 54)} min`);
   if (dryRun) return;
+  if (sensors.length === 0) { console.log('  nothing to do — all selected sensors already covered'); return; }
 
   await withIngestRun(
     {
@@ -383,46 +407,92 @@ async function backfill(days: number, triggerKind: TriggerKind, dryRun: boolean)
       windowStart: from, windowEnd: to,
     },
     async (ctx) => {
-      let inserted = 0, fetched = 0, failed = 0;
+      let inserted = 0, fetched = 0, failed = 0, usedFallback = 0;
       let done = 0;
 
       for (const s of sensors) {
         try {
-          const hours = await fetchSensorHours(Number(s.sensor_id), from, to);
+          // Pick the endpoint by what we already know about the station rather
+          // than discovering it every time. Synthesized stations have no hourly
+          // rollup computed -- /hours returns found:0 for them while
+          // /measurements returns ~165 readings for the same window -- so they
+          // go straight to /measurements. Trying /hours first for these cost
+          // two requests per sensor for nothing.
+          const preferred = s.metadata_source === 'bulk_feed_synthesized'
+            ? 'measurements' as const
+            : 'hours' as const;
+          const alternate = preferred === 'hours'
+            ? 'measurements' as const
+            : 'hours' as const;
+
+          let hours = await fetchSensorHours(Number(s.sensor_id), from, to, preferred);
+          if (hours.length === 0) {
+            hours = await fetchSensorHours(Number(s.sensor_id), from, to, alternate);
+            if (hours.length > 0) usedFallback++;
+          }
           fetched += hours.length;
-          for (const h of hours) {
+
+          // One multi-row INSERT per sensor rather than one per reading.
+          // At 168 readings each, per-row statements made database round-trips
+          // dominate the loop -- 22 sensors/min against a rate limit that
+          // allows 54. Batching removes the bottleneck entirely.
+          if (hours.length > 0) {
+            const params: unknown[] = [];
+            const tuples: string[] = [];
+            hours.forEach((h, i) => {
+              const b = i * 11;
+              const p = (n: number) => `$${b + n}`;
+              tuples.push(`(${p(1)},${p(2)},${p(3)},${p(4)},${p(5)},${p(6)},${p(7)},${p(8)},${p(9)},${p(10)},${p(11)})`);
+              params.push(
+                SOURCE_ID, ctx.runId, s.station_id, Number(s.sensor_id), s.parameter,
+                h.eventTime, h.value, s.units ?? 'µg/m³', valueHash(h.value), h.hasFlags,
+                `https://explore.openaq.org/locations/${s.station_id.replace(STATION_PREFIX, '')}`,
+              );
+            });
             const res = await ctx.client.query(
               `INSERT INTO aq_measurements
                  (source_id, run_id, station_id, sensor_id, parameter, event_time,
                   value, unit, value_hash, has_flags, source_url)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+               VALUES ${tuples.join(',')}
                ON CONFLICT (source_id, station_id, parameter, event_time, value_hash)
                DO NOTHING`,
-              [SOURCE_ID, ctx.runId, s.station_id, Number(s.sensor_id), s.parameter,
-               h.eventTime, h.value, s.units ?? 'µg/m³', valueHash(h.value), h.hasFlags,
-               `https://explore.openaq.org/locations/${s.station_id.replace(STATION_PREFIX, '')}`],
+              params,
             );
             inserted += res.rowCount ?? 0;
           }
+
+          // Record the attempt regardless of yield, so a sensor that reported
+          // nothing is never re-fetched for this window.
+          await ctx.client.query(
+            `UPDATE aq_sensors
+                SET backfill_attempted_at = now(), backfill_window_start = $2, backfill_rows = $3
+              WHERE sensor_id = $1`,
+            [Number(s.sensor_id), from, hours.length]);
         } catch (err) {
-          // One dead sensor must not abort a 20-minute backfill.
+          // One dead sensor must not abort a long backfill.
           failed++;
-          if (failed <= 3) {
-            console.error(`    sensor ${s.sensor_id} failed: ${err instanceof Error ? err.message.slice(0,90) : err}`);
+          const msg = err instanceof Error ? err.message : String(err);
+          if (failed <= 3) console.error(`    sensor ${s.sensor_id} failed: ${msg.slice(0,90)}`);
+          if (msg.includes('budget exhausted')) {
+            console.log(`    budget reached at ${done}/${sensors.length} — re-run to continue`);
+            break;
           }
         }
         done++;
-        if (done % 100 === 0) {
+        if (done % 50 === 0) {
           console.log(`    ${done}/${sensors.length} sensors — ${inserted} rows, ${failed} failed, ${stats.requests} api calls`);
         }
       }
 
-      console.log(`  fetched=${fetched} inserted=${inserted} failed_sensors=${failed}`);
+      console.log(`  fetched=${fetched} inserted=${inserted} fallback_used=${usedFallback} failed_sensors=${failed}`);
       return {
         value: undefined,
         outcome: {
           rowsFetched: fetched, rowsInserted: inserted, rowsRejected: 0,
-          notes: { days, sensors: sensors.length, failed_sensors: failed, api_requests: stats.requests },
+          notes: {
+            days, sensors: sensors.length, failed_sensors: failed,
+            measurements_fallback_used: usedFallback, api_requests: stats.requests,
+          },
         },
       };
     },
