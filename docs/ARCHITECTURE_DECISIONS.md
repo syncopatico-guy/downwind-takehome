@@ -7,7 +7,7 @@ across Western North America, using five real-time data feeds.
 technical decision, the alternatives that were considered, and the reasoning that
 selected one over the others. It is maintained continuously as the build proceeds.
 
-**Status:** Live document. Last updated at end of **Step 4** (OpenAQ ingester, complete).
+**Status:** Live document. Last updated at end of **Step 5** (Open-Meteo wind + CAMS).
 
 ---
 
@@ -728,6 +728,105 @@ as a claim it can make anywhere. Recorded because the justification given when
 the storage budget was chosen turned out to be much weaker in practice than in
 principle.
 
+### 3p. Open-Meteo — batching, forecast rows, and a model that disagrees
+
+#### Batching changed what the constraint was
+
+Verified against the live API: multi-location batching accepts comma-separated
+coordinate lists, and `past_days` combines with `forecast_days` in a single
+call. 200 coordinates per request is safe; 400 works; 800 returns HTTP 414 on
+URL length.
+
+Consequence: **all 800 stations, seven days of history and two days of forecast,
+cost about four requests.** After OpenAQ's 60 req/min grind — where requests,
+not storage, were binding — this feed inverted the calculus entirely.
+
+That reopened one earlier decision. "Wind and CAMS at stations, not on a grid"
+had been chosen on cost, and cost meant requests. With requests nearly free,
+only storage counted, so **CAMS was additionally sampled on a coarse H3 r3 grid
+(546 cells)**: a model's value is partly to cover ground that has no sensors,
+which is most of fire country, and sampling it only where sensors already exist
+forfeits exactly that. **Wind stayed at station and fire precision** — Open-Meteo
+resolves ~9–11 km, and 69 km cells would smooth away the valley channeling that
+drove the September 2020 episode.
+
+#### Request weighting, found by instrumenting
+
+A dry run reported 5 requests for 4 batches with zero retries and 33 seconds
+elapsed — a signature that only made sense as a hidden rate-limit wait.
+Instrumenting it confirmed **a 429 after 3 requests**: Open-Meteo weights by
+request *cost*, and a 200-location, 7-variable, 9-day call consumes far more
+than one unit.
+
+**Consequence for the cron (Step 6): the hourly run must not request seven days
+of history every time.** `past_days=1` cuts the weight roughly fourfold; the
+seven-day pull is a one-off backfill.
+
+#### Forecast rows — the bitemporal design doing real work
+
+**Chosen: ingest 48 hours of forecast alongside history.** A forecast value is
+superseded by analysis as time passes, arriving as a *new row with a later
+ingest_time* rather than overwriting — so "what we expected the wind to do" and
+"what it actually did" stay separable, and the replay can show both. This is the
+clearest payoff yet from Decision 3a.
+
+Rejected: history only (simpler queries, but leaves a third of the chosen
+question — "where is it heading next" — unanswerable).
+
+#### The most important data-quality finding so far
+
+Comparing modelled against measured PM2.5 at co-located station-hours:
+
+| Metric | Value |
+|---|---|
+| Paired station-hours | **112,917** |
+| Mean observed PM2.5 | 5.73 µg/m³ |
+| Mean modelled PM2.5 | **8.13 µg/m³** (42% high) |
+| Correlation | **0.118** |
+
+CAMS runs systematically high and tracks ground sensors only weakly. **The agent
+must never present modelled and measured values as interchangeable**, and any
+answer resting on CAMS where no sensor exists carries a materially weaker claim
+than one resting on a measurement.
+
+One caveat stated honestly: present conditions are clean — median 5 µg/m³, p95
+under 20 — and correlation is naturally weak with little dynamic range. Whether
+CAMS tracks reality during an actual smoke event is a question the September 2020
+seed can answer, with readings past 500 µg/m³. That measurement is worth taking
+before drawing a firm conclusion.
+
+#### Verified result
+
+`weather_hourly` 172,800 rows (136,000 analysis / 36,800 forecast);
+`model_aq_hourly` 290,736 rows (228,820 / 61,916), spanning 2026-09-15 to 09-23.
+Wind direction distribution is plausible for the West Coast in September (W/NW
+dominant, E/NE least common). Boundary-layer height ranges from **50 m at p10**
+to 1,305 m at p90 — the low end being severe trapping, which is how a moderate
+fire produces hazardous surface readings.
+
+### 4e. Storage: the constraint has arrived
+
+**267 MB of 500 MB used after Step 5.**
+
+| Table | Size |
+|---|---|
+| `model_aq_hourly` | 102 MB |
+| `aq_measurements` | 65 MB |
+| `weather_hourly` | 59 MB |
+| `nws_zones` | 12 MB |
+| everything else | ~29 MB |
+
+Remaining: ~233 MB for the September 2020 seed, `smoke_attributions` and
+`hourly_frames`. At the density observed here, a 5–6 day seed across four feeds
+would cost roughly 125 MB, leaving ~105 MB for the derived layer.
+
+That fits, but without much room, and the attribution table is the hardest in
+the system to size in advance. **The levers, in the order they should be pulled:**
+narrow the seed window; drop the CAMS grid for the seed only (117,936 rows is
+the single largest line item and the seed's value is concentrated where sensors
+existed); reduce seed scope to Oregon and Washington, where the record readings
+occurred.
+
 ## Decision 4 — Storage and hosting
 
 Candidate infrastructure was verified against current pricing and feature documentation
@@ -1118,7 +1217,10 @@ the first route or component is written.
 | 3m | Roster gap | Synthesize from the bulk feed at zero API cost | Individual lookups (all 404) |
 | 3n | AQ history endpoint | Choose by metadata_source; /measurements for synthesized | Try /hours for all (2 req/sensor, 0 rows) |
 | 3o | PM10 | Retain, but treat dust discrimination as station-specific | Assume the ratio is generally available |
+| 3p | CAMS grid | Add H3 r3 grid for CAMS once requests proved cheap | Stations only |
+| 3q | Forecast rows | Ingest 48h forecast; superseded by analysis bitemporally | History only |
 | 4a | Store | Neon Postgres + PostGIS | ClickHouse Cloud (no durable free tier) |
+| 4e | Storage headroom | 267/500 MB; narrow the seed first if pressed | Cut a graded deliverable |
 | 4d | DB drivers | `pg` for scripts, `@neondatabase/serverless` for routes | One driver everywhere |
 | 4b | Ingestion trigger | GitHub Actions cron | Vercel Cron (daily-only on Hobby) |
 | 4c | New technology | DuckDB-WASM + Parquet, client-side scrub | Self-hosted ClickHouse |

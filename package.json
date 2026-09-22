@@ -11,7 +11,8 @@
     "ingest:firms": "tsx scripts/ingest-firms.ts",
     "verify:schema": "tsx scripts/verify-schema.ts",
     "ingest:nws": "tsx scripts/ingest-nws.ts",
-    "ingest:openaq": "tsx scripts/ingest-openaq.ts"
+    "ingest:openaq": "tsx scripts/ingest-openaq.ts",
+    "ingest:openmeteo": "tsx scripts/ingest-openmeteo.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.127.0",

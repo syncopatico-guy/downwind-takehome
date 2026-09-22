@@ -16,8 +16,8 @@ interactive replay timeline, deployed publicly.
 | 2 | FIRMS fire-detection ingester | **done** |
 | 3 | NWS alerts ingester + zone geometry | **done** |
 | 4 | OpenAQ stations and measurements | **done** |
-| 5 | Open-Meteo wind + CAMS model AQ | next |
-| 6 | GitHub Actions cron | |
+| 5 | Open-Meteo wind + CAMS model AQ | **done** |
+| 6 | GitHub Actions cron | next |
 | 7 | Fire clustering | |
 | 8 | Smoke attribution | |
 | 9 | `hourly_frames` rollup | |
@@ -34,9 +34,13 @@ all with resolvable geometry; 429 zones cached; 134,652 AQ measurements across
 1,193 stations, with 434–438 H3 r4 cells covered on every day of the seven-day
 window. Database **106 MB** of a 500 MB ceiling. Three of five feeds live.
 
-**Storage watch:** Step 5 adds `weather_hourly` and `model_aq_hourly` at ~800
-sample points (~134k rows each, ~60 MB). That puts the running total near
-170 MB before the 2020 seed, attribution table and frames.
+**Storage watch — now the live constraint.** 267 MB of 500 MB used. Remaining
+~233 MB covers the 2020 seed, attribution and frames; a 5–6 day seed would cost
+roughly 125 MB at observed density. Levers in order: narrow the seed window,
+drop the CAMS grid for the seed only, reduce seed scope to OR/WA.
+
+**Cron note for Step 6:** Open-Meteo weights requests by cost and returned a 429
+after 3 large calls. The hourly run must use `past_days=1`, not 7.
 
 ---
 
