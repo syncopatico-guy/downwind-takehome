@@ -1,4 +1,7 @@
 @import "tailwindcss";
+/* MapLibre ships its own stylesheet and does not render correctly without
+   it -- the canvas is created and sized, but nothing paints. */
+@import "maplibre-gl/dist/maplibre-gl.css";
 
 :root {
   --background: #ffffff;
