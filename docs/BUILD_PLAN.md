@@ -20,14 +20,19 @@ interactive replay timeline, deployed publicly.
 | 6 | GitHub Actions cron | **done** — 5 workflows, 173 runs/day, all paths tested |
 | 7 | Fire clustering | **done** — 617 clusters, identity verified stable |
 | 8 | Smoke attribution | **done** — 1,270 attributions, 20.9% of elevated hours explained |
-| 9 | `hourly_frames` rollup | **done** — 165k frames, 28 MB |
+| 9 | `hourly_frames` rollup | **done** — 179,847 frames, 26 MB |
 | 10 | September 2020 seed backfill | **skipped deliberately** — live data has a real attributable event |
 | 11 | Query layer — the nine agent tools | **done** — 9 tools, registry, HTTP routes, 73 verification checks passing |
-| 12 | The agent | **next** — blocked on `ANTHROPIC_API_KEY` |
-| 13 | Parquet export + DuckDB-WASM scrub | |
-| 14 | Interface | |
-| 15 | Deploy | |
-| 16 | Golden-question eval set | stretch |
+| 12 | The agent | **done** — two-phase, enforced citations, effort routing |
+| 13 | Parquet export + DuckDB-WASM scrub | **cut for time** — server-query fallback shipped |
+| 14 | Interface | **done** — map, timeline, chat, evidence drawer, freshness strip |
+| 15 | Deploy | **done** — https://downwind-takehome.vercel.app/ |
+| 16 | Golden-question eval set | **cut for time** — stretch, first in the agreed cut order |
+
+**All four technical requirements and both deliverable requirements are met.**
+Steps 13 and 16 were the two items in the pre-agreed cut order and both were
+cut, in that order. Step 10 was skipped deliberately and earlier, for different
+reasons (see below).
 
 **Verified state after Step 11:** nine tools in `lib/tools/`, each returning
 the provenance envelope; `npm run verify:tools` runs 73 behavioural checks
@@ -36,20 +41,60 @@ against live data, all passing. HTTP surface at `/api/tools` and
 definitions are derived from them via `z.toJSONSchema`, so the schema the model
 sees and the schema that validates the call cannot drift.
 
-**Open before Step 14:** no workflow rebuilds the derived layer
-(`cluster:fires`, `attribute:smoke`, `build:frames` are manual-only), so
-`hourly_frames` sits ~12 hours behind raw measurements and the timeline would
-lag the map.
+**Verified state after Step 12:** gather via `toolRunner({stream:true})`,
+compose via `messages.parse()` + `zodOutputFormat(ClaimsSchema)`, every
+citation validated against record ids the tools actually returned. Effort is
+routed from the question's shape (22/22 cases). Two limits guard the public
+endpoint: 12 questions per caller per hour, and a **global** $2.00 rolling-day
+ceiling — a hundred callers asking one question each defeats any per-caller
+limit.
 
-**Verified state after Step 4:** 7,431 fire detections over 8 days; 890 alerts,
+**Verified state after Step 14:** one `Chat` instance repositioned by CSS
+rather than two with separate state; the scrub position drives the agent's time
+context. Three interface faults were found only by using it, not by reading it.
+
+**Verified state after Step 15 (deployed, smoke-tested 2026-09-22):**
+
+| Check | Result |
+|---|---|
+| MapLibre worker MIME type | `application/javascript`, 19,007 B — `prebuild` generated the gitignored dir on Vercel's builder |
+| Function region | `x-vercel-id: yul1::cle1::…` — us-east-2, beside Neon |
+| Route latency | 92 ms record · 93 ms tools · 140 ms map · 313 ms timeline |
+| Agent end-to-end | 32.2 s, effort `low`, `compose_attempts: 1`, 26/26 citations verified, 0 invented |
+| Model in production | `claude-opus-5` |
+| Timeline scrub | live → 17 Sep: 0 → 225 fires, worst 40.5 → 140 µg/m³, alert polygons appear |
+
+**Closed since Step 11:** the derived layer now rebuilds on a schedule
+(`derive` job in the hourly workflow, `needs: ingest` + `if: always()`), so
+`hourly_frames` no longer sits ~12 hours behind the raw measurements.
+
+**Verified state after Step 4** *(historical snapshot — see the Storage watch
+above for current figures)*: 7,431 fire detections over 8 days; 890 alerts,
 all with resolvable geometry; 429 zones cached; 134,652 AQ measurements across
 1,193 stations, with 434–438 H3 r4 cells covered on every day of the seven-day
 window. Database **337 MB** of a 500 MB ceiling. Three of five feeds live.
 
-**Storage watch — now the live constraint.** 267 MB of 500 MB used. Remaining
-~233 MB covers the 2020 seed, attribution and frames; a 5–6 day seed would cost
-roughly 125 MB at observed density. Levers in order: narrow the seed window,
-drop the CAMS grid for the seed only, reduce seed scope to OR/WA.
+**Storage watch — the live constraint throughout.** **396 MB of 500 MB** as of
+2026-09-22 18:40 UTC, after reclaiming 24 MB. Neon Free blocks *inserts,
+updates and deletes* at the 0.5 GB ceiling, so running out is not a degraded
+mode — it is a stop.
+
+| Table | Size |
+|---|---|
+| `model_aq_hourly` | 134 MB |
+| `weather_hourly` | 121 MB |
+| `aq_measurements` | 66 MB |
+| `hourly_frames` | 26 MB (was 50 MB before `VACUUM FULL`) |
+
+Two things measured while clearing headroom for the deploy. `hourly_frames` had
+**zero dead tuples** before the vacuum — the `--vacuum` in `build:frames` works;
+plain `VACUUM` simply cannot return free pages to the OS, and the 24 MB was
+in-page free space that will drift back as upserts continue. The other three
+tables also show zero dead tuples: they are append-only with `ON CONFLICT DO
+NOTHING`, so their size is genuine data and no reclaim is available there.
+
+Levers remaining, in order: prune superseded forecast revisions older than 3
+days; drop the CAMS grid; pay for a Neon tier.
 
 **Cron note for Step 6:** Open-Meteo weights requests by cost and returned a 429
 after 3 large calls. The hourly run must use `past_days=1`, not 7.
@@ -97,7 +142,13 @@ unmapped the most smoke-relevant alerts in the feed.
 
 ---
 
-## Remaining
+## Step detail, as originally planned
+
+These were written forward, before each step was built, and are kept as the
+record of intent. **The Status table above is authoritative for what actually
+happened** — everything here through Step 15 is built except Steps 10, 13 and
+16. Where the plan below was wrong, the correction lives in
+`ARCHITECTURE_DECISIONS.md` rather than being edited out here.
 
 ### Step 4 — OpenAQ  (ground measurements)
 
@@ -206,14 +257,25 @@ The new-technology deliverable. Timeboxed with a server-query fallback.
 
 ---
 
-## Schedule risk
+## Schedule risk — how it actually resolved
 
-Steps 11–14 are the largest block and all land on day 3. That is the
-compression point.
+The prediction was that Steps 11–14 were the largest block, all landing on day
+3, and that this was the compression point. **That was correct.** The agreed cut
+order was: eval set first, then DuckDB-WASM, falling back to server queries so
+the timeline still scrubs.
 
-**Agreed cut order:** eval set first, then DuckDB-WASM (falling back to server
-queries, so the timeline still scrubs).
+**Both cuts were taken, in exactly that order,** and nothing outside the cut
+order was sacrificed to make room. The fallback behaved as designed: the
+timeline scrubs over a 59 KB series fetched in one call, with map redraws
+costing a 140 ms round trip instead of being instant.
 
-**If day 2 slips,** the first lever is narrowing the 2020 seed (Step 10), not
-cutting anything in 11–14 — the seed is demo insurance, whereas 11–14 are the
-graded deliverables.
+The other lever — narrowing the 2020 seed rather than cutting anything in 11–14
+— was never needed, because Step 10 was dropped entirely and earlier, on the
+grounds that the live data already contained a real attributable event. That
+decision returned roughly a day to the compressed block and is the single
+largest reason 11, 12, 14 and 15 all landed.
+
+**What the cuts cost:** the timeline is not zero-latency, and the honesty
+behaviours in the agent are demonstrated rather than continuously verified.
+Neither is a missing requirement; both are described in
+`docs/ARCHITECTURE_SUMMARY.html`.

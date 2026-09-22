@@ -28,7 +28,13 @@ the way they are) and `BUILD_PLAN.md` (what's done and what's next).
 
 ---
 
-## Status: Steps 1–11 done · Step 10 **deliberately skipped** · next is **Step 12**
+## Status: SHIPPED — deployed and smoke-tested
+
+**Live: https://downwind-takehome.vercel.app/**
+
+All four technical requirements and both deliverable requirements are met.
+Steps 13 and 16 were the two items in the pre-agreed cut order and both were
+cut, in that order. Step 10 was skipped earlier, for different reasons.
 
 | Step | State |
 |---|---|
@@ -39,14 +45,25 @@ the way they are) and `BUILD_PLAN.md` (what's done and what's next).
 | 5 Open-Meteo wind + CAMS | done |
 | 6 GitHub Actions cron (5 workflows) | done, verified in CI |
 | 7 Fire clustering | done — 617 clusters, identity stable |
-| 8 Smoke attribution | done — 1,270 attributions |
-| 9 `hourly_frames` | done — 165k frames |
-| **10 Sept 2020 seed** | **SKIPPED** — see below |
-| **11 Query layer (9 tools)** | **done** — 73 verification checks passing |
-| 12 The agent | **NEXT — blocked on `ANTHROPIC_API_KEY`** |
-| 14 Interface (13 folded in) | |
-| 15 Deploy | |
-| 16 Golden-question eval set | stretch, first to cut |
+| 8 Smoke attribution | done — 1,270 attributions, 20.9% of elevated hours |
+| 9 `hourly_frames` | done — 179,847 frames |
+| **10 Sept 2020 seed** | **SKIPPED deliberately** — see below |
+| 11 Query layer (9 tools) | done — 73 verification checks passing |
+| 12 The agent | done — two-phase, enforced citations, effort routing |
+| **13 Parquet + DuckDB-WASM** | **CUT for time** — server-query fallback shipped |
+| 14 Interface | done — map, timeline, chat, evidence drawer, freshness |
+| 15 Deploy | done — Vercel Hobby, `cle1`, Opus |
+| **16 Golden-question eval set** | **CUT for time** — first in the agreed cut order |
+
+**Deploy smoke test (2026-09-22), all passing:** MapLibre worker serves as
+`application/javascript` (the `prebuild` copy runs on Vercel's builder);
+functions confirmed in `cle1` via `x-vercel-id`; route latency 92–313 ms; agent
+end-to-end 32.2 s with effort `low`, one compose attempt, **26/26 citations
+verified, 0 invented**; production model `claude-opus-5`; scrubbing to 17 Sep
+moved the view from 0 to 225 fires and surfaced alert polygons.
+
+**Narrative summary for interview defence:** `docs/ARCHITECTURE_SUMMARY.html`
+(untracked, local only). Import to Google Docs via File → Open.
 
 **Why 10 was skipped:** it was insurance against a flat demo, but the live data
 already contains a real attributable event — the Yosemite complex at 37,709 MW,
@@ -59,22 +76,45 @@ both deliverable requirements were still unbuilt, and all of that value lives in
 
 ## Data state
 
+Measured 2026-09-22 18:40 UTC.
+
 | Table | Rows | Size |
 |---|---|---|
-| `model_aq_hourly` | 290,736 | 102 MB |
-| `weather_hourly` | 249,736 | 95 MB |
-| `aq_measurements` | ~135,000 | 65 MB |
-| `hourly_frames` | 165,012 | 28 MB |
+| `model_aq_hourly` | 366,095 | 134 MB |
+| `weather_hourly` | 326,376 | 121 MB |
+| `aq_measurements` | 138,117 | 66 MB |
+| `hourly_frames` | 179,847 | 26 MB |
 | `nws_zones` | 429 | 13 MB |
-| `fire_detections` | 7,719 | 7 MB |
+| `fire_detections` | 8,883 | 7 MB |
 | `alerts` | 890 | 2 MB |
 | `fire_clusters` | 617 | small |
 | `smoke_attributions` | 1,270 | 784 kB |
-| **Database total** | | **337 MB / 500 MB** |
+| **Database total** | | **396 MB / 500 MB** |
 
-**Storage is the binding constraint.** The hourly cron adds genuine forecast
-revisions (~37 MB/day at a 24h horizon). Levers, in order: narrow any seed;
-prune superseded rows older than 3 days; drop the CAMS grid.
+**Storage is the binding constraint, and running out is a stop rather than a
+degraded mode.** Neon Free blocks *inserts, updates AND deletes* at the 0.5 GB
+ceiling — you cannot delete your way out once over.
+
+Two measurements taken while clearing headroom before the deploy:
+
+- `VACUUM FULL hourly_frames` took it **50 MB → 26 MB** and the database
+  **420 MB → 396 MB**. Dead tuples were already **zero** beforehand: the
+  `--vacuum` in `build:frames` works; plain `VACUUM` simply cannot return free
+  pages to the OS. That 24 MB was in-page free space and **will drift back** as
+  upserts continue — ~50 MB was the working-set equilibrium.
+- `model_aq_hourly`, `weather_hourly` and `aq_measurements` all show **zero
+  dead tuples** — append-only with `ON CONFLICT DO NOTHING`, so their size is
+  genuine data and no reclaim is available. Do not attempt `VACUUM FULL` on the
+  134 MB table: it needs transient space roughly equal to the table.
+
+**CAMS was thinned 4×/day → 2×/day** to slow permanent growth. Honest caveat
+recorded in 8e: the 24-hour figure used to size that change was contaminated by
+a same-day backfill, so it stands as a precaution and the growth rate should be
+re-measured over a clean window. **Clean baseline: 396 MB at 2026-09-22 18:40
+UTC.**
+
+Levers remaining, in order: prune superseded forecast revisions older than 3
+days; drop the CAMS grid; pay for a Neon tier.
 
 **KNOWN LIMITATION — live OpenAQ density is thin, accepted deliberately.**
 GitHub delivers ~10% of the declared cron cadence. `/latest` returns one row
@@ -82,8 +122,10 @@ per sensor per call, so readings per station equal successful runs: **2.59/day
 live vs 22–23/day backfilled**. Open-Meteo and FIRMS are unaffected (their
 endpoints return a full window). Consequence: attribution and `hourly_frames`
 thin going forward, so the live tail of the timeline will look sparser than the
-backfilled week beside it. **Revisit at Step 14**, once the UI can show whether
-it actually looks wrong. Fix if needed: a daily `--mode=backfill --days=1`
+backfilled week beside it. **Revisited at Step 14 and accepted:** with the UI
+built, the live tail does not read as broken — the timeline carries 179,847
+frames and scrubbing shows real change. Not worth the remaining time. Fix if
+ever needed: a daily `--mode=backfill --days=1`
 workflow (~17 min/run, ~9 MB/day). An external `workflow_dispatch` pinger would
 fix the cadence itself but was rejected — it needs a `workflow`-scoped token in
 a third-party service against a public repo.
@@ -95,8 +137,6 @@ a full rebuild upserts 176k rows and leaves that many dead tuples, which took
 `hourly_frames` from 28 MB to 49 MB in one pass. A full rebuild stays manual.
 Verified in CI — both jobs green, 1m51s + 1m25s.
 
-**Storage: 411 MB of 500.** This is the live constraint. Levers in order:
-prune superseded rows older than 3 days; drop the CAMS grid.
 
 **Cron status (2026-09-22):** for the first two hours after registration
 GitHub fired **zero** scheduled runs across all five workflows, while manual
@@ -105,8 +145,19 @@ throughout. All five cron expressions were moved off the contended
 `:00/:15/:30/:45` boundaries (cadences unchanged) and all five workflows were
 dispatched manually in two batches — batched so the two Open-Meteo callers and
 the two OpenAQ callers never ran concurrently. All five succeeded; every source
-now reports `fresh`. **Whether the offsets actually fix scheduling is unproven
-— check `gh run list --event schedule` early next session.**
+now reports `fresh`.
+
+**Resolved, partially.** The offsets did work — `gh run list --event schedule`
+now shows scheduled runs firing across all five workflows, where previously
+there were none at all. Delivery is still well below declared cadence: on
+2026-09-22 nothing fired between 18:14 and 19:47 despite NWS declaring four
+runs an hour and FIRMS two. Accepted, and the rejected fix stands rejected.
+
+**Known live failure mode.** The hourly run can die on an Open-Meteo 429 — the
+18:12 run on 2026-09-22 retried twice at 30 s, then threw a bare `fetch failed`
+from `lib/openmeteo.ts:53`. Open-Meteo and OpenAQ still use their own older
+retry loops rather than `lib/http.ts`, which is why that failure reports so
+poorly. See item 12 below.
 
 Coverage: 5 feeds, **7+ days of history on every one**. 800 selected AQ
 stations covering 438 H3 r4 cells. 617 fire clusters (88 `likely_wildfire`,
@@ -124,7 +175,18 @@ stations covering 438 H3 r4 cells. 617 fire clusters (88 `likely_wildfire`,
 | `OPENAQ_API_KEY` | set |
 | `FIRMS_MAP_KEY` | set (only needed for archive backfill; live CSVs are keyless) |
 | `NWS_USER_AGENT` | set |
-| `ANTHROPIC_API_KEY` | **EMPTY — blocks Step 12** |
+| `ANTHROPIC_API_KEY` | set — $20 credits, $20/month cap, $15 notification |
+
+**Vercel** project `downwind-takehome`, Hobby (free), functions pinned to
+`cle1` (us-east-2) via `vercel.json` so they sit beside Neon. Environment
+variables set there: `DATABASE_URL`, `ANTHROPIC_API_KEY`,
+`AGENT_MODEL=claude-opus-5`, plus `OPENAQ_API_KEY` and `NWS_USER_AGENT` as
+insurance (the deployed app never imports the ingestion libraries that read
+them). `FIRMS_MAP_KEY` is deliberately **not** set — archive backfill only.
+
+The Neon Vercel integration was deliberately **declined** at import: it
+provisions a new database and injects its own `DATABASE_URL`, which would have
+overridden the real one and pointed the app at an empty database.
 
 GitHub repo secrets: `DATABASE_URL`, `OPENAQ_API_KEY`, `NWS_USER_AGENT`.
 **Never paste secret values into GitHub with surrounding quotes** — they are
@@ -154,7 +216,12 @@ npm run build:frames
 ```
 
 Most accept `--dry-run` and `--budget=<minutes>`. Migrations are numbered
-`001`–`017` in `db/migrations/`.
+`001`–`019` in `db/migrations/`.
+
+```
+npm run verify:tools           # 73 behavioural checks against live data
+npm run ask -- "<question>"     # the agent from the CLI
+```
 
 ---
 
@@ -291,7 +358,7 @@ parameter.
 - **Freshness has four states**: `fresh`, `stale`, `one_off`/`not_scheduled`,
   `never_succeeded`. "Never scheduled" and "overdue" are different facts.
 
-## Steps 12, 14, 15 — decided shape
+## Steps 12, 14, 15 — as built
 
 - **Agent:** `toolRunner({stream:true})` gathers (streaming per-tool progress),
   then `client.messages.parse()` + `zodOutputFormat(ClaimsSchema)` composes.
@@ -302,8 +369,18 @@ parameter.
 - **Interface:** MapLibre GL, map-dominant, docked chat, permanently visible
   timeline. Evidence drawer: claim → record → upstream API. Per-feed freshness
   strip. Cold open: seeded state + example questions.
-- **New technology (Step 13, folded into 14):** DuckDB-WASM reading a Parquet
-  export of `hourly_frames` client-side, so scrubbing never touches the
-  network. Timeboxed with a server-query fallback.
-- **Deploy:** Vercel. Hobby cron is daily-only, which is why ingestion lives in
-  GitHub Actions.
+- **New technology:** five, all shipped and load-bearing — H3 hexagonal
+  indexing (r6/r5/r4, matched to query granularity), PostGIS (`ST_DWithin` and
+  `ST_Distance` drive the upwind cone; `ST_Intersects` does containment-only
+  labelling), MapLibre GL 6, the Anthropic tool runner with structured output,
+  and Zod→JSON-Schema generation. **Step 13 (DuckDB-WASM over a Parquet export)
+  was CUT** — the timebox expired and the server-query fallback shipped, so the
+  timeline scrubs over a 59 KB series fetched in one call with map redraws
+  costing ~140 ms. `@duckdb/node-api` is installed; the export script is the
+  remaining work.
+- **Deploy:** Vercel Hobby, free. Hobby cron is daily-only, which is why
+  ingestion lives in GitHub Actions. Functions pinned to `cle1` (us-east-2)
+  beside Neon via `vercel.json`. Hobby's function ceiling is **300 s** with
+  Fluid compute, so the ~100 s agent needs no paid tier — an earlier assumption
+  of a 60 s cap was wrong. Public URL; exposure bounded by the global $2.00/day
+  spend cap rather than by authentication.
