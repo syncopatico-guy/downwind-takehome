@@ -1566,6 +1566,76 @@ spot in 4m and the per-station density miss -- surfaced only because a claim was
 checked against the database instead of being asserted. The first conclusion in
 this section was confident, specific, and wrong.
 
+### 4o. The derived layer had no schedule
+
+Found while building `rank_places`: the newest frame carried 456 cells and
+**zero** stations. The cause was not the frame builder but the absence of one.
+
+`cluster:fires`, `attribute:smoke` and `build:frames` were manual-only. Nothing
+in the five workflows ran them, so the derived layer froze at whenever someone
+last ran it by hand:
+
+| | Newest content | Computed |
+|---|---|---|
+| `aq_measurements` (raw) | 13:07 | — |
+| `fire_clusters` | 21 Sep 22:20 | 02:55 |
+| `smoke_attributions` | 00:06 | 02:58 |
+| `hourly_frames` | **02:00** | 03:07 |
+
+The timeline would have sat about twelve hours behind the map — visible in the
+deliverable, and invisible in any check that only looked at raw tables.
+
+**Chosen: a separate `derive` job in the hourly workflow**, `needs: ingest` with
+`if: always()`. A job rather than more steps, for two reasons that earn the
+extra runner: an Open-Meteo 429 in the ingest must not also skip a rebuild that
+is pure database work and still useful on slightly older data, and a rebuild
+failure must not mask a successful ingest in the run status.
+
+Rejected: a workflow of its own on a separate cron, which would have had no
+ordering guarantee against ingestion — and, given measured scheduling
+reliability of roughly 10%, two unreliable schedules instead of one.
+
+#### Measuring it changed the design twice
+
+The three scripts cost 3.4 s, 9.9 s and 66 s — unremarkable. The rollup's
+**write pattern** was the problem. It upserts, so a full 9-day rebuild rewrites
+176,000 rows and leaves that many dead tuples behind. One pass took
+`hourly_frames` from 28 MB to 49 MB and the database from 385 MB to 406 MB
+against a 500 MB ceiling. On an hourly schedule that is a slow leak.
+
+Two consequences:
+
+- **The cron rebuilds `--days=2`, not the 9-day default.** Two days covers the
+  window where raw data still changes — late OpenAQ corrections, FIRMS
+  reprocessing — at a quarter of the churn: 44k rows rewritten instead of 176k,
+  +1 MB instead of +21 MB. A full rebuild stays a manual operation.
+- **`build:frames` gained `--vacuum`,** so the job that causes the churn cleans
+  up after itself. `VACUUM (ANALYZE)` clears 44,265 dead tuples in ~200 ms.
+  Autovacuum does handle it eventually — it had already run twice unprompted —
+  but it lags, and the table grows while it waits.
+
+#### A lag that is documented rather than engineered away
+
+Clustering creates a `sample_point` for each new fire, but wind is sampled only
+at points that were active when the ingest ran. So a fire first detected this
+cycle has no wind at its location and cannot be attributed until the next one —
+137 of 618 fire points currently carry wind. Forcing it would mean re-running
+the wind ingest inside the derive job, spending an Open-Meteo call to save an
+hour of latency on a feed that is already rate-limited.
+
+#### Verified in CI, not locally
+
+Per Decision 4h, the workflow was dispatched rather than assumed: both jobs
+green, ingest 1m51s then derive 1m25s, correctly sequenced. Afterwards the
+derived layer sits within the hour of raw instead of twelve behind, and
+`hourly_frames` reports 0 dead tuples.
+
+One tool needed fixing first: the YAML checker hardcoded the `ingest` job, so
+it would have reported ALL PARSE OK without ever looking at the job being
+added.
+
+**Storage now 411 MB of 500.**
+
 ## Decision 5 — The agent
 
 ### Governing principle: the model never performs arithmetic
@@ -2068,6 +2138,8 @@ the first route or component is written.
 | 4m | Error text | Record `describeFetchError` in `ingest_runs` | `err.message` (undici gives only "fetch failed") |
 | 4n | Cadence | Accept thinned live density; revisit at Step 14 | External `workflow_dispatch` pinger (rejected: PAT on a public repo) |
 | 4n | OpenAQ window | 6h -> 12h floor, for late reporters only | Claiming it as gap insurance (it is not; `/latest` is a point read) |
+| 4o | Derived-layer refresh | A `derive` job after the hourly ingest, same workflow | Its own cron (no ordering, and a second unreliable schedule) |
+| 4o | Rollup window on cron | `--days=2` + `--vacuum` | Full 9-day rebuild (+21 MB of dead tuples per run) |
 | 4g | Freshness population | Measure over cron runs only; one-offs excluded | Count every run (produced false staleness) |
 | 4d | DB drivers | `pg` for scripts, `@neondatabase/serverless` for routes | One driver everywhere |
 | 4b | Ingestion trigger | GitHub Actions cron | Vercel Cron (daily-only on Hobby) |

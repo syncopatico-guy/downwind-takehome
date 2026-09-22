@@ -88,6 +88,16 @@ workflow (~17 min/run, ~9 MB/day). An external `workflow_dispatch` pinger would
 fix the cadence itself but was rejected — it needs a `workflow`-scoped token in
 a third-party service against a public repo.
 
+**Derived layer is now on a schedule.** `cluster:fires`, `attribute:smoke` and
+`build:frames` run as a `derive` job in the hourly workflow (`needs: ingest`,
+`if: always()`). The cron rebuilds `--days=2 --vacuum`, not the 9-day default:
+a full rebuild upserts 176k rows and leaves that many dead tuples, which took
+`hourly_frames` from 28 MB to 49 MB in one pass. A full rebuild stays manual.
+Verified in CI — both jobs green, 1m51s + 1m25s.
+
+**Storage: 411 MB of 500.** This is the live constraint. Levers in order:
+prune superseded rows older than 3 days; drop the CAMS grid.
+
 **Cron status (2026-09-22):** for the first two hours after registration
 GitHub fired **zero** scheduled runs across all five workflows, while manual
 dispatches of the same files succeeded. Configuration was verified correct
