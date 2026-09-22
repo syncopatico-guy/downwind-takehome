@@ -910,6 +910,25 @@ burns steadily:
 | Wildfires | 1,458–4,799 m | **0.63–2.60** |
 | Industrial | 291–610 m | **0.30–0.37** |
 
+**Corrected during Step 11.** Those figures came from the handful of clusters
+inspected by hand, and were carried into the record as if they described the
+population. Measured across all 617:
+
+| | n | min | median | p90 | max |
+|---|---|---|---|---|---|
+| `likely_industrial` | 34 | 0.21 | **0.37** | 0.54 | 0.59 |
+| `likely_wildfire` | 88 | 0.20 | **0.66** | 1.27 | 2.60 |
+| `indeterminate` | 495 | 0.00 | 0.22 | 0.57 | 1.40 |
+
+The medians hold. The *ranges* overlap far more than stated, which changes how
+the signal may be used: **FRP variability discriminates in one direction only.**
+No industrial cluster exceeds 0.63, so a high value is strong evidence of a
+wildfire — but 36 of 88 wildfires also fall below 0.63, so a low value implies
+nothing. Footprint spread carries the rest of the separation (industrial median
+475 m, wildfire 884 m). `get_fires` states this wherever it reports `frp_cv`,
+because a one-sided discriminator presented as two-sided is exactly the kind of
+overreach the agent would cite.
+
 **Chosen: flag, do not exclude.** A refinery is a real emission source — a
 station downwind of Ferndale genuinely reads elevated PM, and excluding the
 source would leave that reading with no attributable cause. What matters is
