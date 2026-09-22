@@ -1,0 +1,40 @@
+name: Refresh OpenAQ station roster
+
+on:
+  schedule:
+    # UTC. GitHub delays scheduled runs under load and may skip them entirely;
+    # ingest_runs records every attempt with its intended window, so a missed
+    # tick shows up as a provable gap rather than a silent hole.
+    - cron: '20 4 * * *'
+  workflow_dispatch:
+
+# A slow run must never overlap the next tick: concurrent ingest runs would
+# race on the same rows and muddy the provenance log.
+concurrency:
+  group: refresh-roster
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run ingester
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENAQ_API_KEY: ${{ secrets.OPENAQ_API_KEY }}
+          NWS_USER_AGENT: ${{ secrets.NWS_USER_AGENT }}
+        run: |
+          # Daily: re-discover stations, re-run the selection function, and
+          # reconcile the discovery queue. Expensive relative to the hourly
+          # feeds, and the roster changes slowly.
+          npm run ingest:openaq -- --mode=stations --trigger=cron --budget=20

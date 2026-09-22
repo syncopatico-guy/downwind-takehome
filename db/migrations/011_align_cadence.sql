@@ -1,0 +1,14 @@
+-- Migration 011: align declared cadence with actual polling
+--
+-- `cadence_seconds` is a claim about how often we refresh a feed, and
+-- `staleness_seconds` is derived from it. NWS declared 300s (5 min) because
+-- that is roughly how often NOAA publishes -- but we poll every 15 minutes.
+-- Leaving the two out of step would make the health view measure us against a
+-- cadence we never intended to meet.
+--
+-- 15 minutes is a deliberate choice rather than a budget constraint (the repo
+-- is public, so Actions minutes are unlimited): NWS alerts are issued
+-- sporadically, our staleness threshold is an hour, and hammering a public
+-- government API four times faster for no gain in answer quality is not
+-- reasonable use.
+UPDATE sources SET cadence_seconds = 900 WHERE source_id = 'nws_alerts';

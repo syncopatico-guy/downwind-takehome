@@ -7,7 +7,7 @@ across Western North America, using five real-time data feeds.
 technical decision, the alternatives that were considered, and the reasoning that
 selected one over the others. It is maintained continuously as the build proceeds.
 
-**Status:** Live document. Last updated at end of **Step 5** (Open-Meteo wind + CAMS).
+**Status:** Live document. Last updated at end of **Step 6** (GitHub Actions cron).
 
 ---
 
@@ -923,6 +923,57 @@ back to server queries and nothing else breaks.
 
 ---
 
+### 4f. Ingestion scheduling — and why the repository is public
+
+**Chosen: GitHub Actions with per-feed cadences** — NWS every 15 min, FIRMS
+every 30 min, OpenAQ `latest` plus both Open-Meteo feeds hourly, OpenAQ roster
+refresh daily.
+
+**The repository was made public to make this possible.** Actions minutes are
+unlimited for public repositories but capped at 2,000/month for private ones,
+and the designed schedule costs ~11,640 min/month — roughly six times the
+private cap. Per-run cost is not one minute either: checkout, Node setup and
+`npm ci` precede the ingester, and a heavy Open-Meteo run is 2–3 minutes.
+
+| Alternative | Why rejected |
+|---|---|
+| **Private, one workflow every 2 hours** (~1,260 min/month) | Fits the cap and keeps the solution unpublished. Rejected on freshness: two-hour polling against a five-minute alert feed, and the declared staleness thresholds would have to be relaxed to match what the platform allowed rather than what the data deserves. |
+| **Private, hourly, accept overage** | Best freshness while private, but 2,160–2,880 min/month exceeds the cap — billed or suspended. |
+| **Off-platform worker on a VM** | Full scheduling control, no caps, no publishing. Rejected as the largest operational surface to build and monitor on a 3-day budget, for a few dollars a month. |
+
+A secondary consequence that made the private options worse than they first
+looked: our source registry declares staleness thresholds (1h for NWS, 2h for
+OpenAQ) which the health view measures against. Under two-hour polling those
+feeds would report as **perpetually stale** — technically honest, but
+misleading when we are polling as fast as the platform permits. Publishing
+avoided having to choose between a dishonest threshold and a permanently red
+health indicator.
+
+**Cadence is aligned with the declared registry** (migration 011): NWS moved
+from 300s to 900s, because `cadence_seconds` is a claim about how often *we*
+refresh and it should describe what we actually do. 15 minutes is a deliberate
+choice rather than a budget artifact — alerts are issued sporadically, the
+staleness threshold is an hour, and polling a public government API four times
+faster for no gain in answer quality is not reasonable use.
+
+**Hourly Open-Meteo uses `past_days=1`, not 7.** The 429-after-3-requests
+finding (3p) means the deep history pull is a one-off backfill, never something
+a cron repeats.
+
+Three operational details worth stating: every workflow declares a
+`concurrency` group so a slow run cannot overlap the next tick and race on the
+same rows; every workflow has a `timeout-minutes` ceiling; and every workflow
+exposes `workflow_dispatch` for manual runs. GitHub delays scheduled runs under
+load and may skip them outright — `ingest_runs` records each attempt with its
+intended window, so a missed tick is a **provable gap** rather than a silent
+hole.
+
+**A bug caught before it shipped:** the hourly workflow's three commands were
+first emitted as a plain YAML scalar, which folds newlines — so the three
+`npm run` invocations would have become a single malformed command. Caught by
+parsing the generated files with a real YAML parser rather than reading them.
+Fixed with a literal block scalar (`run: |`).
+
 ## Decision 5 — The agent
 
 ### Governing principle: the model never performs arithmetic
@@ -1221,6 +1272,7 @@ the first route or component is written.
 | 3q | Forecast rows | Ingest 48h forecast; superseded by analysis bitemporally | History only |
 | 4a | Store | Neon Postgres + PostGIS | ClickHouse Cloud (no durable free tier) |
 | 4e | Storage headroom | 267/500 MB; narrow the seed first if pressed | Cut a graded deliverable |
+| 4f | Cron + repo visibility | Public repo, per-feed Actions cadences | Private with 2h polling (~1,260 min/month) |
 | 4d | DB drivers | `pg` for scripts, `@neondatabase/serverless` for routes | One driver everywhere |
 | 4b | Ingestion trigger | GitHub Actions cron | Vercel Cron (daily-only on Hobby) |
 | 4c | New technology | DuckDB-WASM + Parquet, client-side scrub | Self-hosted ClickHouse |

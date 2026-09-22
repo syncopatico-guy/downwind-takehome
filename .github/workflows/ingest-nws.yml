@@ -1,0 +1,37 @@
+name: Ingest NWS alerts
+
+on:
+  schedule:
+    # UTC. GitHub delays scheduled runs under load and may skip them entirely;
+    # ingest_runs records every attempt with its intended window, so a missed
+    # tick shows up as a provable gap rather than a silent hole.
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+# A slow run must never overlap the next tick: concurrent ingest runs would
+# race on the same rows and muddy the provenance log.
+concurrency:
+  group: ingest-nws
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run ingester
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          OPENAQ_API_KEY: ${{ secrets.OPENAQ_API_KEY }}
+          NWS_USER_AGENT: ${{ secrets.NWS_USER_AGENT }}
+        run: |
+          npm run ingest:nws -- --trigger=cron
