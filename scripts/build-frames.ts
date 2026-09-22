@@ -17,7 +17,7 @@
  */
 
 import { config } from 'dotenv';
-import { withIngestRun, withTransaction, closePool, reapStaleRuns, type TriggerKind } from '../lib/db';
+import { withIngestRun, query, withTransaction, closePool, reapStaleRuns, type TriggerKind } from '../lib/db';
 
 config({ path: '.env.local', quiet: true });
 config({ quiet: true });
@@ -30,6 +30,7 @@ const hasFlag = (n: string) => process.argv.includes(`--${n}`);
 async function main(): Promise<void> {
   const days = Number(arg('days') ?? 9);
   const dryRun = hasFlag('dry-run');
+  const vacuum = hasFlag('vacuum');
   const triggerKind = (arg('trigger') ?? 'manual') as TriggerKind;
 
   console.log(`\nFrame rollup — window=${days}d${dryRun ? ' (DRY RUN)' : ''}\n`);
@@ -228,6 +229,21 @@ async function main(): Promise<void> {
       };
     },
   );
+
+  if (vacuum) {
+    // The rollup upserts, so every rewritten row leaves a dead tuple behind.
+    // Measured: a full 9-day rebuild took hourly_frames from 28 MB to 49 MB in
+    // one pass, 44,265 dead tuples at 20% of the table. Autovacuum does clear
+    // it -- it had already run twice unprompted -- but it lags, and the table
+    // grows while it waits. On a schedule that is a slow leak against a 500 MB
+    // ceiling, so the job that causes the churn cleans up after itself.
+    //
+    // Deliberately outside withIngestRun: VACUUM cannot run inside a
+    // transaction block, and this is maintenance rather than ingestion.
+    const t0 = Date.now();
+    await query('VACUUM (ANALYZE) hourly_frames');
+    console.log(`  vacuumed hourly_frames in ${Date.now() - t0} ms`);
+  }
 }
 
 main()

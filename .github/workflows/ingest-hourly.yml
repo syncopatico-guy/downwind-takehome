@@ -52,3 +52,53 @@ jobs:
           # per request (or requests per minute), not the span requested.
           npm run ingest:openaq -- --mode=latest --trigger=cron --budget=10
           npm run ingest:openmeteo -- --mode=weather --trigger=cron --past-days=1 --forecast-days=1
+
+  # The derived layer -- clustering, attribution, frames -- had no schedule at
+  # all. Raw measurements ran to 13:07 while hourly_frames stopped at 02:00, so
+  # the timeline would have sat ~12 hours behind the map.
+  #
+  # A separate job rather than more steps in the one above, for two reasons it
+  # earns: an Open-Meteo 429 in the ingest must not also skip the rebuild,
+  # which is pure database work and still useful on slightly older data; and a
+  # rebuild failure must not mask a successful ingest in the run status.
+  # `needs` keeps the ordering, `if: always()` keeps the independence.
+  derive:
+    needs: ingest
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Rebuild the derived layer
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          # Order is a real dependency, not a preference: attribution reads
+          # clusters, and frames read both.
+          #
+          # One-cycle lag is expected and self-correcting. Clustering creates a
+          # sample_point for each new fire, but wind is only sampled at points
+          # that were active when the ingest above ran -- so a fire first seen
+          # this cycle has no wind at its location yet and cannot be attributed
+          # until the next one. Measured: 137 of 618 fire points currently
+          # carry wind. Forcing it would mean re-running the wind ingest here,
+          # which costs an Open-Meteo call to save an hour of latency.
+          npm run cluster:fires -- --trigger=cron
+          npm run attribute:smoke -- --trigger=cron
+
+          # --days=2, not the 9-day default. The rollup upserts, so a full
+          # rebuild rewrites 176k rows and leaves that many dead tuples: one
+          # pass took the table from 28 MB to 49 MB. Two days covers the window
+          # where raw data still changes (late OpenAQ corrections, FIRMS
+          # reprocessing) at a quarter of the churn -- measured 44k rows
+          # rewritten instead of 176k, +1 MB instead of +21 MB. A full rebuild
+          # stays a manual operation.
+          npm run build:frames -- --trigger=cron --days=2 --vacuum
