@@ -7,7 +7,7 @@ across Western North America, using five real-time data feeds.
 technical decision, the alternatives that were considered, and the reasoning that
 selected one over the others. It is maintained continuously as the build proceeds.
 
-**Status:** Live document. Last updated at end of **Step 3** (NWS alerts ingester).
+**Status:** Live document. Last updated during **Step 4** (OpenAQ ingester).
 
 ---
 
@@ -557,6 +557,122 @@ advisory coverage, and surfaced rather than hidden.
 table, because full-fidelity polygons total 672,000 points. Total database
 34 MB against the 500 MB ceiling.
 
+### 3k. OpenAQ — station selection, tier reality, and a roster gap
+
+#### The access pattern is dictated by a 60 req/min limit
+
+Probing settled the design before any code was written:
+
+| Need | Endpoint | Cost |
+|---|---|---|
+| Station roster | `/v3/locations?bbox` — honours bbox | 3 requests |
+| Live values | `/v3/parameters/{id}/latest` — **ignores** bbox, honours `datetime_min` | ~15 requests, filtered client-side |
+| History | `/v3/sensors/{id}/hours` — one request covers a whole range (verified 168/168 hourly values for 7 days) | 1 per sensor |
+
+Per-sensor polling for the live path was impossible: ~1,100 sensors would take
+18+ minutes per run.
+
+#### A station cap was forced, not chosen
+
+Each retained station costs **three** hourly rows — one measurement, plus a
+`weather_hourly` and a `model_aq_hourly` row, because wind and CAMS are sampled
+at its coordinates. Keeping all ~2,000 live sensors would cost ~233 MB for
+seven days alone against a 500 MB ceiling.
+
+**Chosen: 800 stations**, selected by an auditable SQL function
+(`select_aq_stations`) rather than hidden application logic, so the cap can be
+changed without re-discovery and the sampling is reproducible.
+
+Priority order encodes what the product needs: every live **reference** monitor
+(authoritative), then **paired low-cost** sensors within 10 km of one (so
+disagreement is demonstrable as a pair), then **spatial fill** — round-robin
+across H3 r4 cells, so a fire has *some* downwind sensor wherever it burns.
+
+**A correction:** the first version filled "empty" r6 cells. But r6 is ~36 km²
+and 1,401 live stations occupied 766 r6 cells, so nearly every station had its
+own cell and "fill the gaps" selected almost everything — 668 spatial_fill
+against 42 reference, inverting the priority. Fixed by grouping at r4
+(~1,770 km²) with round-robin selection.
+
+#### The reference tier is nearly empty — accepted and surfaced
+
+Only **42 of 856** regulatory monitors reported within 24 hours; **6 within
+three hours**. Verified as a genuine upstream condition rather than stale
+metadata: every station the bulk feed shows fresh is also marked fresh by
+`/locations`, with zero discrepancies. AirNow has effectively stopped feeding
+OpenAQ for this region.
+
+The live network is therefore almost entirely low-cost community sensors
+(AirGradient, Clarity). **Consequence accepted:** the reference-vs-low-cost
+*pairing* the conflict story leaned on does not survive. Instrument tier
+becomes a first-class caveat the agent must state, and conflict rests instead
+on model-versus-measurement (CAMS vs sensors) and sensor-versus-sensor
+disagreement — both of which have ample data.
+
+Rejected alternatives: adding AirNow as a sixth direct feed (strongest fix, but
+an unknown-latency API key plus a sixth ingester on a 3-day budget); widening
+the liveness window (would pad the roster with stations producing no current
+data, making the system look better-sourced than it is).
+
+#### The roster gap — reasoned wrong, then measured
+
+**517 locations publish fresh in-bbox readings but are absent from the roster.**
+
+My initial reasoning said this was cheap to skip: we cap at 800 and already
+discard 601 eligible stations, so more candidates change nothing.
+
+**That was wrong, and measurement showed it.** Those 517 are not redundant with
+what we have — they are *elsewhere*. They occupy 326 r4 cells, of which **182
+contain no live station at all.** Closing the gap meant extending coverage from
+253 to ~435 cells, a **72% gain** — and it matters for the core feature
+specifically, because attribution needs a downwind sensor and fires burn in
+exactly the rural terrain that well-documented urban stations do not cover.
+
+#### Closing it — three wrong attempts, then a free answer
+
+The first two attempts fetched each unknown location individually. Both failed:
+one wedged a run for twenty minutes, the other was cut off by a session
+restart. The third revealed why the approach was doomed:
+
+- Queued location ids return **HTTP 404 "Location not found"** from
+  `/v3/locations/{id}` — they are gone from the locations API while their
+  measurements keep flowing. The ten minutes of lookups would have 404'd every
+  time.
+- `/v3/sensors/{id}` *does* resolve for them, but carries no coordinates, name,
+  provider or `isMonitor` — only parameter, units and coverage.
+- **The bulk measurement feed already carries coordinates for every reading.**
+
+**Chosen: synthesize minimal stations from the bulk feed, at zero additional
+API cost.** Recovered: coordinates, sensor id, parameter, readings. Not
+recovered: name, provider, tier.
+
+`aq_stations.metadata_source` records which path produced each row
+(`locations_api` vs `bulk_feed_synthesized`), so a synthesized record is never
+mistaken for one with full provenance. Their `instrument_tier` stays
+`'unknown'` rather than being guessed — they are probably low-cost given the
+pattern, but *probably* is not a basis for a claim the agent will cite.
+
+**Verified result:** coverage 253 → **438 cells**. 3,317 stations known (2,801
+full metadata, 516 synthesized); 800 selected (441 full metadata, 359
+synthesized); tier composition 42 reference / 399 low-cost / 359 unknown.
+
+#### Bugs found and fixed in this step
+
+| Bug | Consequence had it shipped |
+|---|---|
+| `spatial_fill` at r6 | Selection priority inverted; coverage concentrated in dense cities |
+| `sample_points` never deactivated | 968 active for 800 selected — Step 5 would sample wind at 21% more points than chosen |
+| `withIngestRun` held a `PoolClient` across long HTTP work | 90s of uninterrupted fetching idled the connection past its timeout; Neon closed it mid-run. Holding a client bought nothing — these are append-only inserts, not transactions. The same latent flaw existed in the NWS zone resolver |
+| Rate limiter slept a flat `reset + 1` seconds | `x-ratelimit-reset: 60` is the window *length*, not time remaining. Every near-exhaustion cost 61s, and the 429 path repeated it up to four times. Replaced with a true sliding window: the same work now takes 10s instead of wedging for 20 minutes |
+| Runs abandoned by a hard crash stayed `running` forever | An unhandled `error` event bypasses the failure handler, so runs 14/15/18 would have polluted the health view permanently. `reapStaleRuns` now closes them |
+
+One non-bug worth recording, because it looked like data loss: 938 matched
+readings produced 649 rows. The diagnostic now reports why — **665 distinct
+sensors, 273 feed-level repeats.** The bulk endpoint returns multiple rows per
+sensor across pages, and the value-hash dedupe absorbs them. That is the third
+time the append-only dedupe has caught upstream duplication, after the FIRMS
+regional overlap and OpenAQ's own repeats.
+
 ## Decision 4 — Storage and hosting
 
 Candidate infrastructure was verified against current pricing and feature documentation
@@ -942,6 +1058,9 @@ the first route or component is written.
 | 3i | Regional overlap | Dedupe key absorbs it; keep both region feeds | Drop the Canada feed |
 | 3j | NWS retention | Accept the 2020 advisory gap, surface it explicitly | Move the seed to a recent window |
 | 3k | Zone geometry | Lazy fetch + permanent cache, type fallback chain | Pre-load all 601 zones |
+| 3k | AQ station cap | 800, auditable SQL selection, round-robin r4 fill | Keep all ~2,000 live sensors |
+| 3l | Reference tier | Accept near-absence; tier becomes a stated caveat | Add AirNow as a sixth feed |
+| 3m | Roster gap | Synthesize from the bulk feed at zero API cost | Individual lookups (all 404) |
 | 4a | Store | Neon Postgres + PostGIS | ClickHouse Cloud (no durable free tier) |
 | 4d | DB drivers | `pg` for scripts, `@neondatabase/serverless` for routes | One driver everywhere |
 | 4b | Ingestion trigger | GitHub Actions cron | Vercel Cron (daily-only on Hobby) |

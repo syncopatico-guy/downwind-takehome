@@ -11,7 +11,7 @@
  *   - responses are always paginated via `pagination.next`
  */
 
-import type { PoolClient } from 'pg';
+import type { Queryable } from './db';
 
 const NWS_BASE = 'https://api.weather.gov';
 
@@ -193,7 +193,7 @@ export interface ZoneResolution {
  * explainable rather than mysterious.
  */
 export async function ensureZonesCached(
-  client: PoolClient,
+  client: Queryable,
   zoneIds: string[],
   opts: { simplifyMetres?: number; maxFetch?: number; retryFailed?: boolean } = {},
 ): Promise<ZoneResolution> {

@@ -9,6 +9,9 @@
 
 import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 
+/** Anything that can run a query: the pool itself, or a checked-out client. */
+export type Queryable = Pick<Pool, 'query'> | Pick<PoolClient, 'query'>;
+
 let pool: Pool | null = null;
 
 export function getPool(): Pool {
@@ -24,9 +27,14 @@ export function getPool(): Pool {
 
   pool = new Pool({
     connectionString,
-    max: 4,                        // Neon free tier: stay modest
-    idleTimeoutMillis: 10_000,
-    connectionTimeoutMillis: 15_000,
+    max: 4,                          // Neon free tier: stay modest
+    // Long ingests are network-bound: a backfill can spend minutes in HTTP
+    // calls between writes. A short idle timeout severed the connection
+    // mid-run, so it is generous here and keepalive is on.
+    idleTimeoutMillis: 60_000,
+    connectionTimeoutMillis: 20_000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
   });
 
   pool.on('error', (err) => {
@@ -109,7 +117,20 @@ export interface IngestRunOutcome {
 
 export interface IngestRunContext {
   runId: number;
-  client: PoolClient;
+  /**
+   * A pool-backed queryable, NOT a checked-out client.
+   *
+   * Deliberate: an earlier version held a PoolClient for the whole callback,
+   * which broke the moment an ingest interleaved writes with long HTTP work --
+   * 519 sequential fetches at ~1 req/s left the connection idle for minutes
+   * and the server closed it ("Connection terminated unexpectedly").
+   *
+   * Holding a client bought nothing, because these writes are append-only
+   * inserts with ON CONFLICT DO NOTHING rather than a transaction. Callers
+   * that genuinely need transactional scope should use withTransaction, whose
+   * work must stay short.
+   */
+  client: Queryable;
 }
 
 /**
@@ -126,6 +147,31 @@ export interface IngestRunContext {
  * failure record survives -- wrapping both together would roll back the very
  * evidence of the failure.
  */
+/**
+ * Close runs left in 'running' by a process that died without unwinding.
+ *
+ * A crash inside withIngestRun's callback normally records 'error', but an
+ * unhandled 'error' EVENT (as opposed to a rejected promise) bypasses that
+ * entirely -- which left two runs permanently 'running' and poisoning the
+ * health view, since a never-finished run is indistinguishable from one still
+ * in flight.
+ */
+export async function reapStaleRuns(maxAgeMinutes = 45): Promise<number> {
+  const rows = await query<{ run_id: string }>(
+    `UPDATE ingest_runs
+        SET status = 'error', finished_at = now(),
+            error_message = coalesce(error_message, 'abandoned: process exited without unwinding')
+      WHERE status = 'running'
+        AND started_at < now() - ($1 || ' minutes')::interval
+      RETURNING run_id`,
+    [maxAgeMinutes],
+  );
+  if (rows.length > 0) {
+    console.log(`  [db] reaped ${rows.length} abandoned run(s): ${rows.map((r) => r.run_id).join(', ')}`);
+  }
+  return rows.length;
+}
+
 export async function withIngestRun<T>(
   spec: IngestRunSpec,
   fn: (ctx: IngestRunContext) => Promise<{ outcome: IngestRunOutcome; value: T }>,
@@ -147,14 +193,14 @@ export async function withIngestRun<T>(
   if (!opened) throw new Error('failed to open ingest run');
   const runId = Number(opened.run_id);
 
-  const client = await getPool().connect();
+  const pool = getPool();
   try {
-    const { outcome, value } = await fn({ runId, client });
+    const { outcome, value } = await fn({ runId, client: pool });
 
     const rejected = outcome.rowsRejected ?? 0;
     const status = rejected > 0 ? 'partial' : 'ok';
 
-    await client.query(
+    await pool.query(
       `UPDATE ingest_runs
           SET status = $2, finished_at = now(),
               rows_fetched = $3, rows_inserted = $4, rows_rejected = $5,
@@ -174,7 +220,7 @@ export async function withIngestRun<T>(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     try {
-      await client.query(
+      await pool.query(
         `UPDATE ingest_runs
             SET status = 'error', finished_at = now(), error_message = $2
           WHERE run_id = $1`,
@@ -184,7 +230,5 @@ export async function withIngestRun<T>(
       console.error('[db] could not record run failure:', bookkeepingErr);
     }
     throw err;
-  } finally {
-    client.release();
   }
 }
