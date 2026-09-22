@@ -76,6 +76,18 @@ both deliverable requirements were still unbuilt, and all of that value lives in
 revisions (~37 MB/day at a 24h horizon). Levers, in order: narrow any seed;
 prune superseded rows older than 3 days; drop the CAMS grid.
 
+**KNOWN LIMITATION — live OpenAQ density is thin, accepted deliberately.**
+GitHub delivers ~10% of the declared cron cadence. `/latest` returns one row
+per sensor per call, so readings per station equal successful runs: **2.59/day
+live vs 22–23/day backfilled**. Open-Meteo and FIRMS are unaffected (their
+endpoints return a full window). Consequence: attribution and `hourly_frames`
+thin going forward, so the live tail of the timeline will look sparser than the
+backfilled week beside it. **Revisit at Step 14**, once the UI can show whether
+it actually looks wrong. Fix if needed: a daily `--mode=backfill --days=1`
+workflow (~17 min/run, ~9 MB/day). An external `workflow_dispatch` pinger would
+fix the cadence itself but was rejected — it needs a `workflow`-scoped token in
+a third-party service against a public repo.
+
 **Cron status (2026-09-22):** for the first two hours after registration
 GitHub fired **zero** scheduled runs across all five workflows, while manual
 dispatches of the same files succeeded. Configuration was verified correct

@@ -1465,6 +1465,88 @@ record no `request_url`, because each run spans many batched URLs. Their
 provenance is therefore one step shallower than FIRMS and NWS, which name the
 exact endpoint.
 
+### 4n. Cadence: measured, and a wrong conclusion corrected
+
+Once scheduling started, it started badly. Measured over the ten hours after
+the offsets landed, counting GitHub-fired runs only:
+
+| Workflow | Declared | Expected | Fired | Succeeded | Delivery |
+|---|---|---|---|---|---|
+| NWS alerts | 15 min | 40 | 2 | 2 | **5%** |
+| FIRMS | 30 min | 20 | 1 | 0 | **0%** |
+| hourly (OpenAQ + wind) | 60 min | 10 | 2 | 2 | **20%** |
+| CAMS | 6 h | ~1.7 | 1 | 1 | ~60% |
+| roster | daily | ~0.4 | 1 | 1 | 100% |
+
+Seven scheduled runs against ~72 expected -- roughly **10% delivery**, and
+erratic rather than uniformly slow (largest gaps: NWS 312 min, OpenAQ 321 min,
+CAMS 527 min).
+
+A first pass at the consequences reported that event-time coverage was
+unaffected -- 24 of 24 hours every day -- and concluded the feeds were "late,
+not lossy". **That was measured wrong.** It counted distinct hours across the
+whole network, a figure that 1,054 stations each reporting once will satisfy
+trivially. The honest measure is readings per station:
+
+| Day | Readings per station | Path |
+|---|---|---|
+| 09-15 to 09-20 | **22-23** | backfill via `/sensors/{id}/hours` |
+| 09-21 | 15.2 | mixed |
+| 09-22 | **2.59** | live cron only |
+
+An **82% shortfall**, matching the ~20% delivery rate almost exactly -- and for
+a reason that also invalidated the proposed fix.
+
+#### Endpoint shape decides whether sparse scheduling costs anything
+
+| Feed | Endpoint | Resilient? |
+|---|---|---|
+| Open-Meteo wind / CAMS | `past_days` returns the full hourly series | **Yes** -- 24.0 h/point/day, unaffected |
+| FIRMS | a 24h CSV of every detection | **Yes** -- overpass-limited, not cron-limited |
+| NWS | `/alerts/active`, currently-active only | Partly -- an alert starting and ending between polls is missed; backfillable for 7-14 days |
+| OpenAQ `latest` | most recent value **per sensor** | **No** -- readings per station equal successful runs |
+
+The generalisation that failed was assuming every ingester "re-reads a window".
+Two genuinely do. OpenAQ's `latest` is a point read, so widening its
+`datetime_min` from 6h to 12h moved the payload from 10,386 rows to 10,453 and
+could not have done more. A wider window cannot turn a point read into a window
+read.
+
+The widening was kept anyway, for the smaller thing it does buy: a sensor whose
+newest reading is seven hours old was excluded outright by the 6h floor. That
+is real, modest, and costs 0.6% more payload. The comment in the code was
+rewritten to say so, because it had been committed claiming the larger benefit.
+
+#### Decision: accept the thinning
+
+**Chosen: widen the OpenAQ floor, accept reduced live density, and revisit once
+the interface can show what it looks like.**
+
+| Alternative | Why rejected |
+|---|---|
+| **External pinger calling `workflow_dispatch`** | The strongest fix, and the evidence supports it -- every one of seven manual dispatches started within seconds and completed, so dispatch works where scheduling does not. **Rejected on security:** it requires a token with `workflow` scope held by a third-party service, against a deliberately public repository. Parked rather than dismissed. |
+| **A daily backfill workflow** | Restores per-station density via `/sensors/{id}/hours`, ~17 minutes per run at the 60 req/min limit. Deferred: ~9 MB/day against 115 MB of remaining headroom, and the demo replays the dense backfilled history rather than the live tail. |
+| **Relax the declared staleness thresholds** | Turns the health strip green by moving the line. This is precisely the dishonest option Decision 4f went public to avoid. |
+| **Self-looping workflow** | No external credential, but a platform-abuse pattern where one failure takes out the whole window. |
+
+**Reasoning.** Within a three-day budget the live tail is not what the demo
+rests on -- the timeline replays seven days of dense backfilled history, and
+event-time depth is unaffected for three of the four feeds. What the thinning
+does cost is real but deferred: attribution triggers on elevated station-hours
+and `hourly_frames` aggregate them, so both thin going forward, and the live
+portion of the timeline will look sparser than the backfilled portion beside
+it. **That is a visual judgement, and it should be made when it can actually be
+seen.** Revisit trigger: once the interface renders the timeline (Step 14).
+
+**Stated as a limitation rather than hidden:** `get_data_health` reports the
+freshness honestly, four of five sources will read `stale` most of the time,
+and that is the health model working rather than failing.
+
+**A note on how this was caught.** Both errors here -- the network-failure blind
+spot in 4m and the per-station density miss -- surfaced only because a claim was
+checked against the database instead of being asserted. The first conclusion in
+this section was confident, specific, and wrong.
+
 ## Decision 5 — The agent
 
 ### Governing principle: the model never performs arithmetic
@@ -1913,6 +1995,8 @@ the first route or component is written.
 | 4m | Retry reuse | New `lib/http.ts` for FIRMS and NWS; leave OpenAQ/Open-Meteo | One implementation everywhere (refactors working limiter) |
 | 4m | Retry policy | Fail fast on 4xx except 429 | Retry everything (4 attempts on an HTTP 400) |
 | 4m | Error text | Record `describeFetchError` in `ingest_runs` | `err.message` (undici gives only "fetch failed") |
+| 4n | Cadence | Accept thinned live density; revisit at Step 14 | External `workflow_dispatch` pinger (rejected: PAT on a public repo) |
+| 4n | OpenAQ window | 6h -> 12h floor, for late reporters only | Claiming it as gap insurance (it is not; `/latest` is a point read) |
 | 4g | Freshness population | Measure over cron runs only; one-offs excluded | Count every run (produced false staleness) |
 | 4d | DB drivers | `pg` for scripts, `@neondatabase/serverless` for routes | One driver everywhere |
 | 4b | Ingestion trigger | GitHub Actions cron | Vercel Cron (daily-only on Hobby) |

@@ -247,9 +247,25 @@ async function ingestLatest(triggerKind: TriggerKind, dryRun: boolean): Promise<
     return;
   }
 
-  // 6h floor: comfortably wider than the hourly cadence so a late-reporting
-  // station is still caught, while cutting the global payload substantially.
-  const since = new Date(Date.now() - 6 * 3600_000);
+  // 12h floor, widened from 6h on 2026-09-22. Be clear about what this does
+  // and does not buy, because it was first changed for the wrong reason.
+  //
+  // It does NOT protect against sparse scheduling. `/latest` returns the most
+  // recent value per SENSOR, so `datetime_min` only decides which sensors are
+  // included -- those whose newest reading is recent enough -- not how many
+  // readings each one returns. Measured: widening 6h -> 12h moved the payload
+  // from 10,386 rows to 10,453. Readings captured per station equal the number
+  // of successful runs, full stop. Unlike FIRMS (a 24h CSV) and Open-Meteo
+  // (past_days returns the full hourly series), this endpoint is a point read,
+  // so a wider window cannot make it a window read.
+  //
+  // What it does buy is coverage of late-reporting stations: a sensor whose
+  // newest reading is 7 hours old was excluded by the 6h floor entirely. That
+  // is a real if modest gain, and it costs 0.6% more payload.
+  //
+  // Restoring per-station hourly density needs the /v3/sensors/{id}/hours path
+  // (mode=backfill), which is one request per sensor.
+  const since = new Date(Date.now() - 12 * 3600_000);
 
   for (const param of AQ_PARAMETERS) {
     const paramId = PARAM_IDS[param];
