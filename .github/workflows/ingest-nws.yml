@@ -5,7 +5,14 @@ on:
     # UTC. GitHub delays scheduled runs under load and may skip them entirely;
     # ingest_runs records every attempt with its intended window, so a missed
     # tick shows up as a provable gap rather than a silent hole.
-    - cron: '*/15 * * * *'
+    # Offset off :00/:15/:30/:45. Measured 2026-09-22: two hours after these
+    # workflows registered, GitHub had fired ZERO scheduled runs across all
+    # five, while manual dispatches of the same files succeeded. Nothing in the
+    # configuration was wrong -- public repo, Actions enabled, workflows active
+    # on the default branch, valid expressions. The quarter-hour boundaries are
+    # the most contended slots on the platform and GitHub drops scheduled
+    # events under load, so the schedule now avoids them.
+    - cron: '8,23,38,53 * * * *'
   workflow_dispatch:
 
 # A slow run must never overlap the next tick: concurrent ingest runs would

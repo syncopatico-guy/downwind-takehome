@@ -2,15 +2,23 @@ name: Ingest CAMS model air quality
 
 on:
   schedule:
-    # Every 6 hours, offset from the hourly job at :05 so they do not contend
-    # for Open-Meteo's rate limit simultaneously.
+    # Every 6 hours, offset from the hourly job at :34 so they do not contend
+    # for Open-Meteo's rate limit simultaneously -- 23 minutes apart, against
+    # an hourly job that finishes in 2-3 minutes and is capped at 15.
     #
     # Cadence is set by the MODEL, not by us: CAMS publishes on a ~12h cycle.
     # Measured, an hourly run 30 minutes after a full pull returned 0 new rows
     # from 96,912 fetched -- the value-hash dedupe correctly rejecting every
     # one. Polling twice per cycle picks up an update within 6 hours without
     # spending ~200 requests a day to discard identical data.
-    - cron: '15 */6 * * *'
+    # Offset off :00/:15/:30/:45. Measured 2026-09-22: two hours after these
+    # workflows registered, GitHub had fired ZERO scheduled runs across all
+    # five, while manual dispatches of the same files succeeded. Nothing in the
+    # configuration was wrong -- public repo, Actions enabled, workflows active
+    # on the default branch, valid expressions. The quarter-hour boundaries are
+    # the most contended slots on the platform and GitHub drops scheduled
+    # events under load, so the schedule now avoids them.
+    - cron: '57 1,7,13,19 * * *'
   workflow_dispatch:
 
 concurrency:
