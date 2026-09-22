@@ -147,10 +147,26 @@ export default function Timeline({ frames, at, pinnedToNow, onScrub, onPinNow }:
 
   return (
     <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-2 select-none">
-      <div className="mb-1 flex items-baseline justify-between gap-4 text-[11px]">
+      {/*
+        At 375px this row wrapped to four lines -- the full UTC date, the live
+        badge, the partial count and five percentile readouts all competing --
+        and spent roughly 130px of an 812px screen on chrome before the chart.
+        The date goes short and the percentiles hide below `sm`; the fire count
+        stays, because it is the one number the map cannot show at a glance.
+      */}
+      <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-[11px]">
         <div className="flex items-center gap-3">
           <span className="font-mono text-slate-200">
-            {frame ? new Date(frame.t).toUTCString().replace(' GMT', ' UTC') : '—'}
+            {frame
+              ? <>
+                  <span className="sm:hidden">
+                    {new Date(frame.t).toUTCString().slice(5, 22)} UTC
+                  </span>
+                  <span className="hidden sm:inline">
+                    {new Date(frame.t).toUTCString().replace(' GMT', ' UTC')}
+                  </span>
+                </>
+              : '—'}
           </span>
           {pinnedToNow
             ? <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-300">live</span>
@@ -172,13 +188,15 @@ export default function Timeline({ frames, at, pinnedToNow, onScrub, onPinNow }:
         <div className="flex items-center gap-3 font-mono text-slate-400">
           {frame && (
             <>
-              <span><span className="text-slate-500">p50</span> {frame.pm25_p50 ?? '—'}</span>
-              <span><span className="text-slate-500">p90</span> {frame.pm25_p90 ?? '—'}</span>
-              <span><span className="text-slate-500">p99</span> {frame.pm25_p99 ?? '—'}</span>
-              <span className="text-slate-500" title="The single worst cell — not the regional condition">
+              <span className="hidden sm:inline"><span className="text-slate-500">p50</span> {frame.pm25_p50 ?? '—'}</span>
+              <span className="hidden sm:inline"><span className="text-slate-500">p90</span> {frame.pm25_p90 ?? '—'}</span>
+              <span className="hidden sm:inline"><span className="text-slate-500">p99</span> {frame.pm25_p99 ?? '—'}</span>
+              <span className="hidden text-slate-500 sm:inline" title="The single worst cell — not the regional condition">
                 worst {frame.pm25_worst_cell ?? '—'}
               </span>
-              <span className="text-rose-400/80">{frame.fires} fires</span>
+              {/* Kept at every width: the median is what the chart already
+                  draws, but the fire count is not plotted as a number. */}
+              <span className="whitespace-nowrap text-rose-400/80">{frame.fires} fires</span>
             </>
           )}
         </div>
@@ -237,12 +255,17 @@ export default function Timeline({ frames, at, pinnedToNow, onScrub, onPinNow }:
         </div>
       </div>
 
-      <div className="mt-1 flex items-center gap-3 text-[10px] text-slate-500">
-        <span className="text-emerald-500">— median</span>
-        <span className="text-yellow-500">— p90</span>
-        <span className="text-orange-500">— p99</span>
-        <span className="text-red-900">— worst cell</span>
-        <span className="ml-auto">drag to replay · the agent answers as of this moment</span>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-slate-500">
+        <span className="whitespace-nowrap text-emerald-500">— median</span>
+        <span className="whitespace-nowrap text-yellow-500">— p90</span>
+        <span className="whitespace-nowrap text-orange-500">— p99</span>
+        <span className="whitespace-nowrap text-red-900">— worst cell</span>
+        {/* The hint now names the keyboard path too: arrow keys are the more
+            precise way to scrub, and nothing on screen would otherwise say so. */}
+        <span className="ml-auto whitespace-nowrap sm:hidden">drag to replay</span>
+        <span className="ml-auto hidden whitespace-nowrap sm:inline">
+          drag or press ← → to replay · the agent answers as of this moment
+        </span>
       </div>
     </div>
   );

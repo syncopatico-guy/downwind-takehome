@@ -98,10 +98,19 @@ export default function DownwindApp() {
             onSelect={(recordId) => setCited(recordId)}
           />
 
-          <div className="pointer-events-none absolute inset-x-3 top-3 flex items-start justify-between gap-3">
+          {/*
+            `pr-14` reserves the map's zoom control. Without it this row ran
+            the full width and the counts sat UNDERNEATH the control, so at
+            375px "669 stations" rendered as "669 station…" -- clipped in a way
+            that reads as a bad number rather than a layout bug.
+
+            Stacked below `sm` for the same reason: side by side, the freshness
+            strip and the counts have nowhere near enough room to both be read.
+          */}
+          <div className="pointer-events-none absolute inset-x-3 top-3 flex flex-col items-start gap-2 pr-14 sm:flex-row sm:justify-between sm:gap-3">
             <FreshnessStrip />
             {mapData && (
-              <div className="pointer-events-auto rounded border border-slate-800 bg-slate-950/85 px-2.5 py-1.5 text-[10px] text-slate-400 backdrop-blur">
+              <div className="pointer-events-auto whitespace-nowrap rounded border border-slate-800 bg-slate-950/85 px-2.5 py-1.5 text-[10px] text-slate-400 backdrop-blur">
                 <span className="text-rose-400">{mapData.counts.fires}</span> fires ·{' '}
                 <span className="text-emerald-400">{mapData.counts.stations}</span> stations ·{' '}
                 <span className="text-amber-400">{mapData.counts.alerts}</span> alerts
